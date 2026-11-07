@@ -1425,9 +1425,11 @@ class RandomizeVisitor final : public VNVisitor {
     std::map<std::string, AstCDType*> m_randcDtypes;  // RandC data type deduplication
     AstConstraint* m_constraintp = nullptr;  // Current constraint
     std::unordered_set<const AstClass*> m_visitedClasses;  // Classes visited so far
-    // Per-handle-type pre/post virtual wrapper presence
-    std::map<AstClass*, std::pair<bool, bool>> m_prePostWrap;
-    std::unordered_set<const AstClass*> m_globalOwnerClassps;  // Classes solving sub-objects
+    ActiveSet m_activeClasses;  // Classes currently building randomize()
+    // Whether the basic randomization of the class is split, see basicRandSplit
+    std::unordered_map<const AstClass*, bool> m_basicRandSplit;
+    std::map<AstClass*, std::pair<bool, bool>>
+        m_prePostWrap;  // Per-handle-type pre/post virtual wrapper presence
     // Methods implementing randomize(null), see addRandomizeNullBody
     enum class NullPhase : uint8_t { NONE, ENTRY, PRE, CHECK, POST };
     std::vector<std::tuple<AstClass*, NullPhase, AstFunc*>>
@@ -3321,6 +3323,10 @@ class RandomizeVisitor final : public VNVisitor {
         m_solverp->lowerInlineRandomize(nodep, classp, randomizeFuncp,
                                         withp->exprp()->unlinkFrBackWithNext(),
                                         captured.getThisp(), basicRandomizeFuncCallp);
+        if (split) {
+            randomizeFuncp->addStmtsp(
+                newObjsAfterSolvep(nodep->fileline(), classp, randomizeFuncp->fvarp()));
+        }
 
         // Call nested post_randomize on rand class-type members (IEEE 18.4.1)
         AstNodeStmt* postp = nullptr;
@@ -3381,6 +3387,7 @@ public:
             if (classp->extendsp())
                 m_derivedClasses[classp->extendsp()->classp()].push_back(classp);
         });
+        findRandcClasses(nodep);
         createRandomizeClassVars(nodep);
         // Flag local constraint leaves as solver-owned so __VBasicRand skips them.
         // Runs before any class is lowered. Only a randomized class counts, and
