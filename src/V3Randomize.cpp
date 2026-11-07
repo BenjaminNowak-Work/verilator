@@ -2872,7 +2872,9 @@ class RandomizeVisitor final : public VNVisitor {
                 if (!VN_IS(RandomizeUtil::arrayElementDTypep(memberVarp->dtypep()), ClassRefDType))
                     return;
                 AstVarRef* const refp = new AstVarRef{fl, ownerClassp, memberVarp, VAccess::READ};
-                AstNodeStmt* const stmtp = newRandStmtsp(fl, refp, nullptr, fvarp);
+                // The selected leaf's null and cycle flag are checked in newRandStmtsp.
+                AstNodeStmt* const stmtp
+                    = newMemberRandStmtsp(fl, memberVarp, refp, nullptr, fvarp);
                 funcp->addStmtsp(wrapIfRandMode(
                     classp, memberVarp,
                     new AstBegin{fl, m_uniqueNames.get("__VrandBlock"), stmtp, false}));
