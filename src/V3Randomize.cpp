@@ -2875,6 +2875,7 @@ class RandomizeVisitor final : public VNVisitor {
             });
         }
         if (phase == NullPhase::POST) addPrePostCall(classp, funcp, "post_randomize");
+        if (randomizingVarp) setRandomizing(false);
     }
 
     // VISITORS
