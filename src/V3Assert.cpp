@@ -262,7 +262,17 @@ static void replaceSvaRepCount(AstNodeExpr* countp) {
     VL_DO_DANGLING(countp->deleteTree(), countp);
 }
 
-void V3AssertCommon::checkSvaRepetition(AstSConsRep* nodep, AstNode* errp) {
+void V3AssertCommon::checkSvaRepetition(AstSConsRep* nodep, AstNode* errp, bool emptyOk) {
+    if (VN_IS(nodep->maxCountp(), Unbounded)) {
+        // A '$' actual argument (IEEE 1800-2023 16.8), as [*N:$]
+        AstSConsRep* const newp
+            = new AstSConsRep{nodep->fileline(), nodep->exprp()->unlinkFrBack(),
+                              nodep->countp()->unlinkFrBack(), nullptr, true};
+        newp->dtypeFrom(nodep);
+        nodep->replaceWith(newp);
+        VL_DO_DANGLING(nodep->deleteTree(), nodep);
+        nodep = newp;
+    }
     // The counts must be valid elaboration-time constants.
     V3Const::constifyParamsEdit(nodep->countp());
     const AstConst* minConstp = VN_CAST(nodep->countp(), Const);
@@ -273,7 +283,7 @@ void V3AssertCommon::checkSvaRepetition(AstSConsRep* nodep, AstNode* errp) {
         errp->v3error("Consecutive repetition count must be non-negative"
                       " (IEEE 1800-2023 16.9.2)");
     } else if (checkSvaValueLimit(errp, minConstp, "SVA repetition count")) {
-        if (!nodep->unbounded() && !nodep->maxCountp() && minConstp->toSInt() < 1) {
+        if (!nodep->unbounded() && !nodep->maxCountp() && minConstp->toSInt() < 1 && !emptyOk) {
             errp->v3warn(E_UNSUPPORTED, "Unsupported: [*0] consecutive repetition");
         }
     } else {
@@ -290,7 +300,7 @@ void V3AssertCommon::checkSvaRepetition(AstSConsRep* nodep, AstNode* errp) {
         errp->v3error("Consecutive repetition max count must be >= min count"
                       " (IEEE 1800-2023 16.9.2)");
     } else if (checkSvaValueLimit(errp, maxConstp, "SVA repetition count")) {
-        if (maxConstp->toSInt() < 1) {
+        if (maxConstp->toSInt() < 1 && !emptyOk) {
             errp->v3warn(E_UNSUPPORTED, "Unsupported: [*N:0] consecutive repetition"
                                         " with zero max count");
         }
@@ -343,7 +353,13 @@ static void checkSvaGotoOrNonConsRep(T_Rep* nodep, const char* kind, AstNode* er
                       + " repetition range min count must be non-negative"
                         " (IEEE 1800-2023 16.9.2)");
         replaceSvaRepCount(nodep->countp());
-        replaceSvaRepCount(nodep->maxCountp());
+        if (!unbounded) replaceSvaRepCount(nodep->maxCountp());
+    } else if (unbounded) {
+        // Only ever written in the body, as a '$' actual argument is checked when substituted
+        nodep->maxCountp()->v3warn(E_UNSUPPORTED,
+                                   "Unsupported: " << kind
+                                                   << " repetition range with '$' maximum"
+                                                      " (IEEE 1800-2023 16.9.2)");
     } else if (maxConstp->toSInt() < minConstp->toSInt()) {
         errp->v3error(std::string{kind}
                       + " repetition range max count must be >= min count"
@@ -1839,7 +1855,8 @@ class AssertVisitor final : public VNVisitor {
             nodep->v3warn(E_UNSUPPORTED, "Unsupported: sampled value function clocked by a"
                                          " clocking block or sequence event, of an expression"
                                          " with a nested sampled value function");
-            nodep->replaceWith(new AstConst{nodep->fileline(), AstConst::BitFalse{}});
+            nodep->replaceWith(
+                new AstConst{nodep->fileline(), AstConst::DTyped{}, nodep->dtypep()});
             VL_DO_DANGLING(pushDeletep(nodep), nodep);
             return;
         }
