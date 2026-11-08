@@ -1870,19 +1870,19 @@ package p;
     logic pkgvar;
     function ident;
         input int value;
-        begin : label10
+        begin : label11
             ident = /*CRESET*/;
             ident = value;
-            disable label10;
+            disable label11;
         end
     endfunction
     function uses_const_func;
         logic [1:0]  v;
-        begin : label11
+        begin : label12
             uses_const_func = /*CRESET*/;
             v = /*CRESET*/;
             uses_const_func = 32'h2;
-            disable label11;
+            disable label12;
         end
     endfunction
 endpackage
