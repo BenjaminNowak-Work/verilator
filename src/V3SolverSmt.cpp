@@ -347,6 +347,8 @@ public:
 
 using FastDistGens = std::unordered_map<const AstDist*, AstVar*>;
 
+using FastDistGens = std::unordered_map<const AstDist*, AstVar*>;
+
 class FastConstraintBuilder final {
     struct Range final {
         uint64_t lo;
