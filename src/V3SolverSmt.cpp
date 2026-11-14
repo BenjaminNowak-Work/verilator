@@ -5901,7 +5901,7 @@ private:
 
             // Build loop body based on whether the reduction is per element
             AstVar* const textVarp = newTextVarp(nodep);
-            AstVar* const countVarp = withp ? nullptr : newTermCountVarp(nodep);
+            AstVar* const countVarp = perElem ? nullptr : newTermCountVarp(nodep);
             AstNodeStmt* bodyp;
             if (perElem) {
                 // Per element: evaluate the 'with' expression or the element
