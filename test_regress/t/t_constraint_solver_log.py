@@ -35,12 +35,15 @@ with open(solver_log, encoding="utf8") as fh:
         else:
             entries.append(line)
 for entry in entries:
-    lines = entry.splitlines(keepends=True)
-    # The solver prints a model of array elements over lines it indents, so that model is
-    # balanced as a whole; every other line on its own
-    for unit in [entry] if len(lines) > 1 and "(select" in entry else lines:
-        if unit.startswith(("  (assert", "< ((")) and unit.count("(") != unit.count(")"):
-            test.error("Solver log breaks a line: " + unit[:60])
+    depths = [line.count("(") - line.count(")") for line in entry.splitlines()]
+    # The solver prints a model of several terms one term per line, indenting the later
+    # ones, so its first line opens one more parenthesis and its last closes one more
+    if len(depths) > 1:
+        whole = depths[0] == 1 and depths[-1] == -1 and not any(depths[1:-1])
+    else:
+        whole = not entry.startswith(("  (assert", "< ((")) or depths[0] == 0
+    if not whole:
+        test.error("Solver log breaks a line: " + entry[:60])
 if longest <= 4096:
     test.error("No logged line is longer than a pipe buffer")
 
