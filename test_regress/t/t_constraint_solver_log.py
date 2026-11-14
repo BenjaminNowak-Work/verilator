@@ -29,15 +29,16 @@ longest = 0
 entries = []
 with open(solver_log, encoding="utf8") as fh:
     for line in fh:
-        longest = max(longest, len(line))
+        if line.startswith(("  (assert", "< ((")):
+            longest = max(longest, len(line))
         if line.startswith("<  ") and entries and entries[-1].startswith("< (("):
             entries[-1] += line
         else:
             entries.append(line)
 for entry in entries:
     depths = [line.count("(") - line.count(")") for line in entry.splitlines()]
-    # The solver prints a model of several terms one term per line, indenting the later
-    # ones, so its first line opens one more parenthesis and its last closes one more
+    # z3 prints a model of several terms one term per line, indenting the later ones, so
+    # its first line opens one more parenthesis and its last closes one more
     if len(depths) > 1:
         whole = depths[0] == 1 and depths[-1] == -1 and not any(depths[1:-1])
     else:
