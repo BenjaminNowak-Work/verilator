@@ -13976,10 +13976,13 @@ public:
                               "Unsupported: Stream of a dynamically sized array into "
                                   << lhsDTypeSkippedRefp->prettyDTypeNameQ());
             }
-            const bool packedToDynamic = (VN_IS(lhsDTypeSkippedRefp, DynArrayDType)
-                                          || VN_IS(lhsDTypeSkippedRefp, QueueDType))
-                                         && lhsDTypeSkippedRefp->subDTypep()->isIntegralOrPacked()
-                                         && !VN_IS(streamp->dtypep(), StreamDType);
+            const bool toDynamic
+                = (VN_IS(lhsDTypeSkippedRefp, DynArrayDType)
+                   || VN_IS(lhsDTypeSkippedRefp, QueueDType))
+                  && lhsDTypeSkippedRefp->subDTypep()->skipRefp()->isIntegralOrPacked();
+            // A fixed-size unpacked operand streams its packed value into a dynamic target
+            if (toDynamic && VN_IS(streamp->dtypep(), StreamDType)) packStreamOperand(streamp);
+            const bool packedToDynamic = toDynamic && !VN_IS(streamp->dtypep(), StreamDType);
             if ((packedToDynamic || fixedTarget) && !asQueue) {
                 FileLine* const flp = streamp->fileline();
                 AstNodeExpr* srcp = streamp->unlinkFrBack();

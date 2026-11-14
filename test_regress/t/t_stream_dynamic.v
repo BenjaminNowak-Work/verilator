@@ -367,6 +367,52 @@ module t;
     `checkh(w100, 100'h9abcdef0123456789fedcba98);
   endtask
 
+  // A fixed-size unpacked array streamed into a dynamic array or queue
+  typedef struct {
+    logic [3:0] x;
+    logic [2:0] y;
+  } ustr_t;
+  typedef logic [6:0] elem7_t;
+  task test7;
+    logic [7:0] arr[4];
+    logic [7:0] arr2[2][2];
+    logic [10:0] arr11[3:1];
+    ustr_t sarr[2];
+    elem7_t earr[3:1];
+    elem7_t eq7[$];
+    elem7_t edyn7[];
+    logic [7:0] q8[$];
+    logic [7:0] dyn8[];
+    logic [15:0] q16[$];
+
+    arr = '{8'h11, 8'h22, 8'h33, 8'h44};
+    q8 = {>>{arr}};
+    `checkp(q8, "'{'h11, 'h22, 'h33, 'h44}");
+    q8 = {>>8{arr}};
+    `checkp(q8, "'{'h11, 'h22, 'h33, 'h44}");
+    dyn8 = {>>{arr}};
+    `checkp(dyn8, "'{'h11, 'h22, 'h33, 'h44}");
+    q8 = {<<8{arr}};
+    `checkp(q8, "'{'h44, 'h33, 'h22, 'h11}");
+    dyn8 = {<<16{arr}};
+    `checkp(dyn8, "'{'h33, 'h44, 'h11, 'h22}");
+    arr2 = '{'{8'h55, 8'h66}, '{8'h77, 8'h88}};
+    q8 = {>>{arr2}};
+    `checkp(q8, "'{'h55, 'h66, 'h77, 'h88}");
+    // Zero-filled on the right to a whole number of elements
+    arr11 = '{11'h5bc, 11'h7ef, 11'h123};
+    q16 = {>>{arr11}};
+    `checkp(q16, "'{'hb79f, 'hbc91, 'h8000}");
+    sarr = '{'{4'h9, 3'h5}, '{4'hb, 3'h2}};
+    q8 = {>>{sarr}};
+    `checkp(q8, "'{'h9b, 'h68}");
+    earr = '{7'h11, 7'h22, 7'h33};
+    eq7 = {>>{earr}};
+    `checkp(eq7, "'{'h11, 'h22, 'h33}");
+    edyn7 = {<<7{earr}};
+    `checkp(edyn7, "'{'h33, 'h22, 'h11}");
+  endtask
+
   initial begin
     test1();
     test2();
@@ -374,6 +420,7 @@ module t;
     test4();
     test5();
     test6();
+    test7();
     $write("*-* All Finished *-*\n");
     $finish;
   end
