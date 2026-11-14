@@ -22,5 +22,19 @@ test.execute(all_run_flags=[
     '+verilator+rand+sampler+default', '+check_varied', '+verilator+solver+file+' + log
 ])
 test.file_grep(log, r'; sampler: default')
+# UniGen2 excludes each witness found: one equality alone, as SMT-LIB 'and' takes at least
+# two operands, or one equality per element under 'and'
+test.file_grep(log, r'^  \(assert \(not \(= v +#b[01]+\)\)\)$')
+test.file_grep(log, r'^  \(assert \(not \(and \(= a +#b[01]+\) \(= b +#b[01]+\)\)\)\)$')
+test.file_grep(
+    log, r'^  \(assert \(not \(and \(= \(select q #x00000000\) +#b[01]+\)'
+    r' \(= \(select q #x00000001\) +#b[01]+\) \(= \(select q #x00000002\) +#b[01]+\)\)\)\)$')
+term = r'\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)'
+test.file_grep_not(log, r'\(and +' + term + r'\)')
+
+# A UniGen2 hash equation selecting no bit is still an application of two operands, as
+# SMT-LIB 'bvxor' takes at least two
+test.file_grep(log, r'\(bvxor #b0 #b0\)')
+test.file_grep_not(log, r'\(bvxor +[^ ()]+\)')
 
 test.passes()
