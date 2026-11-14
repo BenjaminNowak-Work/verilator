@@ -30,14 +30,17 @@ entries = []
 with open(solver_log, encoding="utf8") as fh:
     for line in fh:
         longest = max(longest, len(line))
-        # The solver prints a model of several array elements over lines it indents
         if line.startswith("<  ") and entries and entries[-1].startswith("< (("):
             entries[-1] += line
         else:
             entries.append(line)
 for entry in entries:
-    if entry.startswith(("  (assert", "< ((")) and entry.count("(") != entry.count(")"):
-        test.error("Solver log breaks a line: " + entry[:60])
+    lines = entry.splitlines(keepends=True)
+    # The solver prints a model of array elements over lines it indents, so that model is
+    # balanced as a whole; every other line on its own
+    for unit in [entry] if len(lines) > 1 and "(select" in entry else lines:
+        if unit.startswith(("  (assert", "< ((")) and unit.count("(") != unit.count(")"):
+            test.error("Solver log breaks a line: " + unit[:60])
 if longest <= 4096:
     test.error("No logged line is longer than a pipe buffer")
 
