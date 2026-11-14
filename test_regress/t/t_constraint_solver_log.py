@@ -26,12 +26,18 @@ test.file_grep(solver_log, r'\(set-logic QF_BV\)')
 
 # Each command and reply is logged whole, however the pipe split it
 longest = 0
+entries = []
 with open(solver_log, encoding="utf8") as fh:
     for line in fh:
-        if line.startswith(("  (assert", "< ((")):
-            longest = max(longest, len(line))
-            if line.count("(") != line.count(")"):
-                test.error("Solver log breaks a line: " + line[:60])
+        longest = max(longest, len(line))
+        # The solver prints a model of several array elements over lines it indents
+        if line.startswith("<  ") and entries and entries[-1].startswith("< (("):
+            entries[-1] += line
+        else:
+            entries.append(line)
+for entry in entries:
+    if entry.startswith(("  (assert", "< ((")) and entry.count("(") != entry.count(")"):
+        test.error("Solver log breaks a line: " + entry[:60])
 if longest <= 4096:
     test.error("No logged line is longer than a pipe buffer")
 
@@ -46,9 +52,9 @@ for name, value in (('sum_a', '0001001'), ('prod_a', '0001010'), ('and_a', '0001
                     ('or_a', '0001100'), ('xor_a', '0001101')):
     test.file_grep(solver_log,
                    r'\(__Vbv \(= +\(select ' + name + r' #x00000000\) #b' + value + r'\)\)')
-test.file_grep(solver_log, r'\(__Vbool +\(__Vbv \(= \(select fixed #x00000000\) #b0000101\)\)\)')
-test.file_grep(
-    solver_log,
-    r'\(__Vbool +\(__Vbv \(= \(select \(select grid #x00000000\) #x00000000\) #b0000110\)\)\)')
+ite = r'\(ite \(__Vbool sel\) +\(__Vbv \(= '
+test.file_grep(solver_log, ite + r'\(select fixed #x00000000\) #b0000101\)\) #b1\)')
+test.file_grep(solver_log,
+               ite + r'\(select \(select grid #x00000000\) #x00000000\) #b0000110\)\) #b1\)')
 
 test.passes()
