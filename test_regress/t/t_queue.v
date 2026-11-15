@@ -21,7 +21,7 @@ module t (
 
   typedef int q_t[$];
 
-  function void set_val(ref int lhs, input int rhs);
+  function automatic void set_val(ref int lhs, input int rhs);
     lhs = rhs;
   endfunction
 
@@ -39,6 +39,10 @@ module t (
     iq[1000] = 1000;
     `checkh(iq.size(), 2);
     `checks(iq[1000], 0);
+    // Array query functions of a typedef'd queue
+    `checkh($size(iq), 2);
+    `checkh($high(iq), 1);
+    `checkh($right(iq), 1);
   end
 
   always @(posedge clk) begin

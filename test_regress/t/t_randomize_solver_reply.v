@@ -29,6 +29,23 @@ class Softy;
   }
 endclass
 
+// Compatible soft constraints before and after a prioritized relaxation chunk.
+class SoftUnknown;
+  rand bit [6:0] x;
+  rand bit [6:0] y;
+  rand bit [6:0] z;
+  constraint c_domain {
+    x < 7'd3;
+    y < 7'd3;
+    z < 7'd3;
+  }
+  constraint c_kept_domain {y == 7'd0;}
+  constraint c_low {soft y == 7'd1;}
+  constraint c_soft {soft x == 7'd1;}
+  constraint c_high {soft z == 7'd1;}
+  constraint c_order {solve x before y;}
+endclass
+
 // Phased solve...before replies
 class Phased;
   rand bit [3:0] x;
@@ -37,10 +54,22 @@ class Phased;
   constraint rel_c {y > x;}
 endclass
 
-// Array element replies, which arrive as (select ...) terms
+// Array element replies, which arrive as (select ...) terms; a key wider than 32 bits
+// names its element in hex, and an array with no element is still a solver variable
 class Arr;
   rand bit [7:0] q[3];
-  constraint ac {foreach (q[i]) q[i] > 8'd20;}
+  rand bit [7:0] wide[bit [64:0]];
+  rand bit [7:0] z;
+  rand bit [7:0] e[];
+  constraint ac {
+    foreach (q[i]) q[i] > 8'd20;
+    foreach (wide[k]) wide[k] == 8'd77;
+    z != 8'd200;
+    foreach (e[i]) e[i] < 8'd50;
+  }
+  function new;
+    wide[65'h1_2345_6789_abcd_ef01] = 0;
+  endfunction
 endclass
 
 // Unsatisfiable, so the unsat core is queried
@@ -62,7 +91,56 @@ class Pinned;
   }
 endclass
 
+// A variable whose rand_mode is off is still answered, but not written
+class Frozen;
+  rand bit [7:0] f;
+  rand bit [7:0] g;
+  constraint fc {
+    f != g;
+    soft f > 8'd10;
+  }
+endclass
+
 module t;
+  task automatic soft_unknown;
+    automatic SoftUnknown value = new;
+    automatic int phased = 0;
+    automatic int expected = 1;
+    automatic int kept = 0;
+    automatic int ok;
+    if ($value$plusargs("PHASED=%d", phased)) begin
+    end
+    if ($value$plusargs("EXPECT=%d", expected)) begin
+    end
+    if ($value$plusargs("KEPT=%d", kept)) begin
+    end
+    if (phased == 0) value.c_order.constraint_mode(0);
+    value.c_kept_domain.constraint_mode(kept != 0);
+    value.c_low.constraint_mode(kept != 0);
+    value.c_high.constraint_mode(kept != 0);
+    value.x = 7'd7;
+    value.y = 7'd6;
+    value.z = 7'd5;
+    ok = value.randomize();
+    `checkd(ok, expected);
+    if (ok != 0) begin
+      `checkd(value.x, 7'd1);
+      `checkd(value.y < 7'd3, 1'b1);
+      if (kept != 0) begin
+        `checkd(value.y, 7'd0);
+        `checkd(value.z, 7'd1);
+      end
+      else begin
+        `checkd(value.z < 7'd3, 1'b1);
+      end
+    end
+    else begin
+      `checkd(value.x, 7'd7);
+      `checkd(value.y, 7'd6);
+      `checkd(value.z, 7'd5);
+    end
+  endtask
+
   // t_randomize_solver_reply runs the +MODE=pins rows alone, so the replies their
   // TAMPER_AT counts start at the first Pinned call
   task automatic pin_rounds;
@@ -79,6 +157,25 @@ module t;
     $write("NPASS=%0d\n", npass);
   endtask
 
+  // t_randomize_solver_reply runs the +MODE=frozen rows alone, so TAMPER_AT counts the
+  // replies of these calls
+  task automatic frozen_rounds;
+    automatic Frozen fr = new;
+    automatic int npass = 0;
+    automatic int rc;
+    fr.g = 8'd9;
+    fr.g.rand_mode(0);
+    for (int i = 0; i < 4; ++i) begin
+      fr.f = 8'd5;
+      rc = fr.randomize();
+      // A randomize that failed must leave the variables alone
+      if (rc != 0) npass++;
+      else `checkd(fr.f, 8'd5);
+      `checkd(fr.g, 8'd9);
+    end
+    $write("NPASS=%0d\n", npass);
+  endtask
+
   initial begin : checks
     automatic Packet p = new;
     automatic Softy s = new;
@@ -87,6 +184,12 @@ module t;
     automatic Unsat un = new;
     automatic int npass = 0;
     automatic int rc;
+    if ($test$plusargs("MODE=soft_unknown")) begin
+      soft_unknown();
+      $write("*-* All Finished *-*\n");
+      $finish;
+      disable checks;
+    end
     if ($test$plusargs("MODE=pins")) begin
       pin_rounds();
       $write("*-* All Finished *-*\n");
@@ -94,12 +197,21 @@ module t;
       // $finish ends the run only after this process stops, so leave before the checks
       disable checks;
     end
+    if ($test$plusargs("MODE=frozen")) begin
+      frozen_rounds();
+      $write("*-* All Finished *-*\n");
+      $finish;
+      disable checks;
+    end
     for (int i = 0; i < 4; ++i) begin
       // Below the constraint, so any model the runtime applies overwrites it
       p.a = 8'd5;
       rc = p.randomize();
-      // A randomize that failed must leave the variable alone
-      if (rc != 0) npass++;
+      // A randomize that failed must leave the variable alone, one that passed must solve
+      if (rc != 0) begin
+        npass++;
+        `checkd(p.a > 8'd10, 1'b1);
+      end
       else `checkd(p.a, 8'd5);
       rc = s.randomize();
       if (rc != 0) npass++;
@@ -107,8 +219,12 @@ module t;
       if (rc != 0) npass++;
       ar.q[0] = 8'd7;
       rc = ar.randomize();
-      if (rc != 0) npass++;
+      if (rc != 0) begin
+        npass++;
+        `checkd(ar.wide[65'h1_2345_6789_abcd_ef01], 8'd77);
+      end
       else `checkd(ar.q[0], 8'd7);
+      `checkd(ar.e.size(), 0);
       rc = un.randomize();
       `checkd(rc, 0);  // zero-ok: constraints are unsatisfiable
     end
