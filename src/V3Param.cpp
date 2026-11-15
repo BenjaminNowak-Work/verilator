@@ -1327,7 +1327,8 @@ class ParamProcessor final {
     }
 
     // Replace a deferred Dot with valuep, preserving any select on the member name.
-    static void replaceMemberDot(AstDot* dotp, AstParseRef* memberRefp, AstNodeExpr* valuep) {
+    // Defer deleting the Dot, as m_cellps in ParamVisitor may still contain its class reference.
+    void replaceMemberDot(AstDot* dotp, AstParseRef* memberRefp, AstNodeExpr* valuep) {
         if (memberRefp == dotp->rhsp()) {
             dotp->replaceWith(valuep);
         } else {
@@ -1335,7 +1336,7 @@ class ParamProcessor final {
             VL_DO_DANGLING(memberRefp->deleteTree(), memberRefp);
             dotp->replaceWith(dotp->rhsp()->unlinkFrBack());
         }
-        VL_DO_DANGLING(dotp->deleteTree(), dotp);
+        VL_DO_DANGLING(m_deleter.pushDeletep(dotp), dotp);
     }
 
     // True for an expression produced while lowering a deferred struct-member chain.
@@ -1356,7 +1357,7 @@ class ParamProcessor final {
     }
 
     // Lower a Dot exposed after its inner class::member reference was substituted.
-    static void resolveMemberDot(AstDot* dotp) {
+    void resolveMemberDot(AstDot* dotp) {
         AstNodeExpr* const lhsp = VN_CAST(dotp->lhsp(), NodeExpr);
         AstParseRef* const memberRefp = memberParseRef(dotp->rhsp());
         if (!lhsp || !memberRefp || !isDeferredMemberBase(lhsp)) return;
@@ -1439,7 +1440,7 @@ class ParamProcessor final {
             AstRefDType* const refp = new AstRefDType{dotp->fileline(), parseRefp->name()};
             linkClassType(refp, memberp, memberClassp);
             dotp->replaceWith(refp);
-            VL_DO_DANGLING(dotp->deleteTree(), dotp);
+            VL_DO_DANGLING(m_deleter.pushDeletep(dotp), dotp);
         } else if (AstVar* const varp = VN_CAST(memberp, Var)) {
             substituteParamMember(dotp, parseRefp, varp);
         }
