@@ -2966,10 +2966,12 @@ class RandomizeVisitor final : public VNVisitor {
             AstVarRef* const fvarRefReadp = fvarRefp->cloneTree(false);
             fvarRefReadp->access(VAccess::READ);
 
+            // Only after a success, so a failed solve does not randomize rand members, calling
+            // their post_randomize
             AstNodeExpr* const secondHalfp
-                = basicFirst ? beginValp : new AstFuncRef{fl, basicRandomizep};
-            randomizep->addStmtsp(new AstAssign{fl, fvarRefp->cloneTree(false),
-                                                new AstAnd{fl, fvarRefReadp, secondHalfp}});
+                = basicFirst ? beginValp : new AstFuncRef{fl, afterSolveBasicp};
+            randomizep->addStmtsp(new AstIf{
+                fl, fvarRefReadp, new AstAssign{fl, fvarRefp->cloneTree(false), secondHalfp}});
 
             if (basicFirst) m_solverp->addAfterClassSolve(nodep, randomizep);
         }
