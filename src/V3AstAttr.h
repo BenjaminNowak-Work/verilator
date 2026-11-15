@@ -2132,6 +2132,7 @@ public:
         PUBLIC_MODULE,
         PUBLIC_TASK,
         THREADS_GROUP,
+        TIMEPRECISION_SET,
         TIMEUNIT_SET,
         UNROLL_DISABLE,
         UNROLL_FULL,
@@ -2152,6 +2153,7 @@ public:
             "PUBLIC_MODULE",  //
             "PUBLIC_TASK",  //
             "THREADS_GROUP",  //
+            "TIMEPRECISION_SET",  //
             "TIMEUNIT_SET",  //
             "UNROLL_DISABLE",  //
             "UNROLL_FULL",  //
