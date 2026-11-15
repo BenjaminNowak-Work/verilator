@@ -2389,22 +2389,11 @@ class ParamProcessor final {
                 bool allOwnParams = true;
                 for (AstPin* pinp = nodep->paramsp(); pinp && allOwnParams;
                      pinp = VN_AS(pinp->nextp(), Pin)) {
-                    if (AstRefDType* const refp = VN_CAST(pinp->exprp(), RefDType)) {
-                        if (AstParamTypeDType* const ptdp
-                            = VN_CAST(refp->refDTypep(), ParamTypeDType)) {
-                            AstNodeModule* const ptdOwnerp
-                                = V3LinkDotIfaceCapture::findOwnerModule(ptdp);
-                            if (ptdOwnerp != m_modp) allOwnParams = false;
-                        } else {
-                            pinp->v3error(  // LCOV_EXCL_LINE
-                                "Self-referencing interface typedef "
-                                "parameter is not a type parameter of "
-                                "the enclosing interface");
-                        }
-                    } else {
-                        pinp->v3error(  // LCOV_EXCL_LINE
-                            "Self-referencing interface typedef "
-                            "parameter is not a type reference");
+                    const AstRefDType* const refp = VN_CAST(pinp->exprp(), RefDType);
+                    AstParamTypeDType* const ptdp
+                        = refp ? VN_CAST(refp->refDTypep(), ParamTypeDType) : nullptr;
+                    if (!ptdp || V3LinkDotIfaceCapture::findOwnerModule(ptdp) != m_modp) {
+                        allOwnParams = false;
                     }
                 }
                 if (allOwnParams) {
