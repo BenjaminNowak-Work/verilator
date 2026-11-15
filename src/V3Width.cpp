@@ -13263,7 +13263,9 @@ public:
         if (AstNodeStream* const streamp = VN_CAST(nodep->rhsp(), NodeStream)) {
             AstNodeDType* const lhsDTypeSkippedRefp = lhsDTypep->skipRefp();
             if (badStreamTargetArray(nodep, lhsDTypeSkippedRefp)) return;
-            const int lwidth = lhsDTypeSkippedRefp->widthStream();
+            // A string target is not fixed size, it takes the whole stream
+            const int lwidth
+                = lhsDTypeSkippedRefp->isString() ? 0 : lhsDTypeSkippedRefp->widthStream();
             const int rwidth = streamp->lhsp()->dtypep()->skipRefp()->widthStream();
             if (lwidth != 0 && lwidth < rwidth) {
                 nodep->v3widthWarn(lwidth, rwidth,
