@@ -168,6 +168,7 @@ AstVar* V3AssertCommon::newSequenceEvent(FileLine* flp, AstNodeModule* modp, con
                                           firep, VAssertType::CONCURRENT};
     coverp->isCoverSeq(true);
     coverp->isSeqEvent(true);
+    // A concurrent assertion is in its own process, clocked by it in AssertVisitor
     modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ASSERT_COVER, nullptr, coverp});
     return eventp;
 }
@@ -337,17 +338,19 @@ static void checkSvaGotoOrNonConsRep(T_Rep* nodep, const char* kind, AstNode* er
         }
         return;
     }
+    // A '$' maximum is legal, but is not an expression to constify
+    const bool unbounded = VN_IS(nodep->maxCountp(), Unbounded);
     // Accessors are re-fetched after constifyParamsEdit, as it can replace the node in-tree
     V3Const::constifyParamsEdit(nodep->countp());
-    V3Const::constifyParamsEdit(nodep->maxCountp());
+    if (!unbounded) V3Const::constifyParamsEdit(nodep->maxCountp());
     const AstConst* const minConstp = VN_CAST(nodep->countp(), Const);
     const AstConst* const maxConstp = VN_CAST(nodep->maxCountp(), Const);
-    if (!minConstp || !maxConstp) {
+    if (!minConstp || (!maxConstp && !unbounded)) {
         errp->v3error(std::string{kind}
                       + " repetition range bounds must be constant expressions"
                         " (IEEE 1800-2023 16.9.2)");
         if (!minConstp) replaceSvaRepCount(nodep->countp());
-        if (!maxConstp) replaceSvaRepCount(nodep->maxCountp());
+        if (!maxConstp && !unbounded) replaceSvaRepCount(nodep->maxCountp());
     } else if (minConstp->toSInt() < 0) {
         errp->v3error(std::string{kind}
                       + " repetition range min count must be non-negative"
@@ -555,8 +558,11 @@ V3AssertCommon::newSvaLocalVars(const AstNodeSchema* schemap, AstNodeModule* mod
     for (const AstNode* const declp : schemap->declspList()) {
         const AstVar* const varp = VN_CAST(declp, Var);
         if (!varp || varp->isIO()) continue;
+        // An XTEMP stays one, see isMatchItem in V3AssertNfa
+        const VVarType varType
+            = varp->varType() == VVarType::XTEMP ? VVarType::XTEMP : VVarType::MODULETEMP;
         AstVar* const newVarp
-            = new AstVar{varp->fileline(), VVarType::MODULETEMP, names.get(varp), varp->dtypep()};
+            = new AstVar{varp->fileline(), varType, names.get(varp), varp->dtypep()};
         newVarp->lifetime(VLifetime::STATIC_EXPLICIT);
         modp->addStmtsp(newVarp);
         localVarMap[varp] = newVarp;
@@ -1429,6 +1435,9 @@ class AssertVisitor final : public VNVisitor {
     // Pending calls run in the Reactive region unless a flush of their process clears them
     // (IEEE 1800-2023 16.4.1).
     AstNodeStmt* newObservedDeferredAction(FileLine* flp, AstNodeStmt* actionsp) {
+        // The null statement of an 'else;', an empty implied block, has no call to defer
+        const AstBegin* const beginp = VN_CAST(actionsp, Begin);
+        if (beginp && beginp->implied() && !beginp->stmtsp()) return actionsp;
         if (!(actionsp->isOutputter() || VN_IS(actionsp, SFormat) || VN_IS(actionsp, StmtExpr))) {
             actionsp->v3error("Observed deferred immediate assertion action block must be a "
                               "single subroutine call (IEEE 1800-2023 16.4).");
@@ -1545,9 +1554,9 @@ class AssertVisitor final : public VNVisitor {
         }
         if (m_beginp && nodep->name() == "") nodep->name(m_beginp->name());
 
-        // An immediate or deferred assertion's expression is not a property or sequence
-        // expression, so a future value function there is left for visit(AstFuture) to
-        // reject (IEEE 1800-2023 16.9.4).
+        // An immediate assertion's expression is not a property or sequence expression, so a
+        // future value function there is left for visit(AstFuture) to reject (IEEE 1800-2023
+        // 16.9.4)
         if (!nodep->immediate()) AssertDeFutureVisitor{nodep->propp(), m_modp, m_modPastNum++};
 
         iterateAndNextNull(nodep->sentreep());
@@ -1639,11 +1648,7 @@ class AssertVisitor final : public VNVisitor {
                     nodep, VN_IS(nodep, AssertIntrinsic) ? "'$cast' failed." : "'assert' failed.");
             if (obsDeferred) {
                 if (passsp) passsp = newObservedDeferredAction(flp, passsp);
-                // The empty block of an 'else' null statement has nothing to defer
-                const AstBegin* const nullElsep = VN_CAST(failsp, Begin);
-                if (failsp && !(nullElsep && nullElsep->implied() && !nullElsep->stmtsp())) {
-                    failsp = newObservedDeferredAction(flp, failsp);
-                }
+                if (failsp) failsp = newObservedDeferredAction(flp, failsp);
             }
         } else {
             nodep->v3fatalSrc("Unknown node type");

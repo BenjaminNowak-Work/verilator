@@ -1804,10 +1804,6 @@ class LinkDotFindVisitor final : public VNVisitor {
             rewriteIfacePortRefsSingle(newDeclp, portName);
             bodyp->addDeclsp(newDeclp);
         }
-        // The statements go in a block named for the task, as their unnamed blocks are numbered
-        // in this module, so would clash with the interface's own.
-        AstBegin* const bodyp
-            = new AstBegin{nodep->fileline(), "__Vexport_" + nodep->name(), nullptr, true};
         for (AstNodeStmt* const stmtp : nodep->stmtspList()) {
             // Clone this statement and rewrite port references
             AstNodeStmt* const newStmtp = stmtp->cloneTree(false);
@@ -5517,11 +5513,8 @@ class LinkDotResolveVisitor final : public VNVisitor {
                                                           << cellp->modp()->prettyNameQ());
                     }
                 }
-            } else if (allowScope && !allowFTask
-                       && (VN_IS(foundp->nodep(), NodeFTask)
-                           || VN_IS(foundp->nodep(), NodeSchema))) {
+            } else if (allowScope && !allowFTask && VN_IS(foundp->nodep(), NodeFTask)) {
                 // Function/task used as scope for static variable access (IEEE std 1800-2017 6.21)
-                // Also a sequence or property, as the scope of its items and methods
                 // Don't set m_dotText so the static variable resolves as a VarRef rather than
                 // VarXRef. This is so that V3Begin won't move it out of the function/task's scope.
                 // If already hierarchical, keep the function/task in the VarXRef's path, which
@@ -5838,9 +5831,8 @@ class LinkDotResolveVisitor final : public VNVisitor {
             } else if (const AstLambdaArgRef* const argrefp
                        = VN_CAST(foundp->nodep(), LambdaArgRef)) {
                 if (allowVar) {
-                    AstLambdaArgRef* const newp
+                    AstNode* const newp
                         = new AstLambdaArgRef{nodep->fileline(), argrefp->name(), false};
-                    newp->randomizeTarget(argrefp->randomizeTarget());
                     nodep->replaceWith(newp);
                     VL_DO_DANGLING(pushDeletep(nodep), nodep);
                     ok = true;

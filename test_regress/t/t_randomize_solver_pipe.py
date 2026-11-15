@@ -105,9 +105,9 @@ test.execute(logfile=logfile,
              'TAMPER=model_trunc TAMPER_AT=12 ')
 test.file_grep(logfile, r'NPASS=(\d+)', 12)
 
-# A malformed phase value reply, from which the next phase builds asserts the
-# solver rejects; the replies queued behind its first error must not answer
-# later calls.
+# A value the sampler can't parse, and a status it can't use, seen while it
+# enumerates a cell. The solver rejects several commands of that call, and the
+# replies queued behind its first error must not answer later calls.
 logfile = test.obj_dir + '/sim_ug2_value.log'
 test.execute(logfile=logfile,
              run_env='VERILATOR_SOLVER="' + test.t_dir + '/randomize_solver_tamper.py" ' +

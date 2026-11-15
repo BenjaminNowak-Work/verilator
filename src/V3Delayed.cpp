@@ -109,6 +109,29 @@
 //      if (__Vdly_Set__LHS) LHS[__Vdly_Dim0__LHS][__Vdly_Dim1__LHS] = __Vdly_Val__LHS;
 // Multiple consecutive NBAs of compatible form can share the same __Vdly_Set* flag
 //
+// "Flag array" scheme. Used instead of shared flags for dense, constant-index
+// whole-element updates in ordered code. One array of flags and one array of
+// captured values replace the per-NBA temporaries. Dense means at least as
+// many NBA sites as total array elements, and more than one site. The flag
+// temporaries start zeroed, and each committed element clears its flag:
+//   LHS[1][2] <= RHS
+// becomes, at the original NBA:
+//   __Vdly_Val__LHS[1][2] = RHS;
+//   __Vdly_Set__LHS[1][2] = 1;
+// and in the post block, once per written element:
+//   if (__Vdly_Set__LHS[1][2]) {
+//       __Vdly_Set__LHS[1][2] = 0;
+//       LHS[1][2] = __Vdly_Val__LHS[1][2];
+//   }
+// All writes to a target must qualify; otherwise keep its existing scheme,
+// so constant-index writes cannot be reordered relative to other updates.
+// Sparse or single-site writes retain the shared flag scheme. As a cost heuristic,
+// consecutive sites also keep that scheme: one group can share a flag set/test,
+// instead of setting and testing a flag for every element. This target-wide choice
+// can leave other dense sites unoptimized, e.g. alongside an adjacent reset group.
+// Shared arrays can serialize their writers under --threads; fewer model members
+// do not by themselves establish a simulation speedup.
+//
 // "Generic" scheme is the most general, and uses a queue of closures, which
 // when committed performs the update to the target variable in the order they were
 // enqueued. This always guarantees NBAs are committed in the order the NBA statements
@@ -168,6 +191,7 @@
 #include "V3Stats.h"
 #include "V3VNUserAllocator.h"
 
+#include <set>
 #include <unordered_set>
 
 VL_DEFINE_DEBUG_FUNCTIONS;
@@ -302,9 +326,9 @@ protected:
                 AstVarScope* maskp;  // The mask variable
             } m_shadowVarMaskedKit;
             struct {  // Stuff needed for Scheme::FlagArray
-                AstAlwaysPost* postp;  // The post block for commiting results
-                AstVarScope* flagsp;  // The array of flags
-                AstVarScope* valuesp;  // The array of values
+                AstAlwaysPost* postp;  // The post block committing elements
+                AstVarScope* flagsp;  // Array of pending flags, shaped like the target
+                AstVarScope* valuesp;  // Array of captured values, shaped like the target
             } m_flagArrayKit;
             struct {  // Stuff needed for Scheme::FlagShared
                 AstActive* activep;  // The active block for the Pre/Post logic
@@ -465,6 +489,18 @@ class DelayedRecord final : public VNVisitorConst, public DelayedBase {
         }
     }
 
+    // Return whether 'lhsp' selects a whole unpacked array element at constant indices.
+    static bool isConstElement(const AstNodeExpr* lhsp) {
+        if (!VN_IS(lhsp, ArraySel) || VN_IS(lhsp->dtypep()->skipRefp(), UnpackArrayDType)) {
+            return false;
+        }
+        while (const AstArraySel* const selp = VN_CAST(lhsp, ArraySel)) {
+            if (!VN_IS(selp->bitp(), Const)) return false;
+            lhsp = selp->fromp();
+        }
+        return VN_IS(lhsp, VarRef);
+    }
+
     // Record the NBA 'nodep' updating 'lhsp'
     void recordNba(AstNodeStmt* nodep, AstNodeExpr* lhsp) {
         UASSERT_OBJ(m_vtxp, nodep, "<= not under sensitivity block");
@@ -495,6 +531,12 @@ class DelayedRecord final : public VNVisitorConst, public DelayedBase {
         targetInfo.m_whole |= VN_IS(lhsp, VarRef);  // At least one whole access
         targetInfo.m_inLoop |= m_inLoop;
         targetInfo.m_event |= VN_IS(nodep, FireEvent);
+        ++targetInfo.m_nNbas;
+        // Conservatively retain the old scheme for consecutive NBAs to this target.
+        const bool afterSameTarget = !m_state.nbas.empty()
+                                     && m_state.nbas.back().targetp->sameTree(nbaRefp)
+                                     && m_state.nbas.back().nodep->nextp() == nodep;
+        targetInfo.m_constElems &= !afterSameTarget && isConstElement(lhsp);
 
         // Record the sensitivities updating this variable, or that it's updated outside them
         const ProcVertex* const procVtxp = m_vtxp->cast<ProcVertex>();
@@ -884,6 +926,15 @@ class DelayedAnalysis final : public DelayedBase {
         }
     }
 
+    // Whether full arrays fit within the number of NBA sites they replace. Divide the
+    // remaining budget per dimension rather than multiplying dimensions, which can overflow.
+    static bool flagArraysFit(const AstUnpackArrayDType* dtypep, uint32_t nNbas) {
+        for (; dtypep; dtypep = VN_CAST(dtypep->subDTypep()->skipRefp(), UnpackArrayDType)) {
+            nNbas /= dtypep->elementsConst();
+        }
+        return nNbas != 0;
+    }
+
     // Choose the NBA scheme used for the given variable.
     Scheme chooseScheme(const AstVarScope* vscp, const TargetInfo& targetInfo) {
         UASSERT_OBJ(targetInfo.m_scheme == Scheme::Undecided, vscp, "NBA scheme already decided");
@@ -987,10 +1038,15 @@ class DelayedRewrite final : public VNDeleter, public DelayedBase {
     size_t m_nClosureFuncs = 0;  // Number of closure functions, for unique names
     AstAssignDly* m_nextDlyp = nullptr;  // The nextp of the previous AstAssignDly
     AstVarScope* m_prevVscp = nullptr;  // The target of the previous AstAssignDly
+    // Shared flag array types preserve temporary sharing between instances.
+    std::map<const AstNodeDType*, AstNodeDType*> m_flagArrayDTypeps;
+    // Commit each element once. Index tuples avoid overflow when flattening dimensions.
+    std::set<std::pair<const AstVarScope*, std::vector<uint32_t>>> m_flagArrayElems;
 
     // STATE - Statistic tracking
     VDouble0 m_nSchemeShadowVar;  // Number of variables using Scheme::ShadowVar
     VDouble0 m_nSchemeShadowVarMasked;  // Number of variables using Scheme::ShadowVarMasked
+    VDouble0 m_nSchemeFlagArray;  // Number of variables using Scheme::FlagArray
     VDouble0 m_nSchemeFlagShared;  // Number of variables using Scheme::FlagShared
     VDouble0 m_nSchemeGenericLocal;  // Number of variables using Scheme::GenericLocal
     VDouble0 m_nSchemeGenericGlobal;  // Number of variables using Scheme::GenericGlobal
@@ -1329,7 +1385,7 @@ class DelayedRewrite final : public VNDeleter, public DelayedBase {
     }
 
     // Scheme::FlagArray
-    // Return an unpacked array of bits with the same dimensions as 'dtypep'
+    // Return an unpacked array of bits with the same dimensions as 'dtypep'.
     AstNodeDType* flagArrayDType(AstUnpackArrayDType* dtypep) {
         AstNodeDType*& resultpr = m_flagArrayDTypeps[dtypep];
         if (!resultpr) {
@@ -1343,66 +1399,68 @@ class DelayedRewrite final : public VNDeleter, public DelayedBase {
         }
         return resultpr;
     }
-    // Return the element of 'arrayp' at the constant indices of the element 'selp'
-    static AstNodeExpr* sameElement(AstNodeExpr* selp, AstVarScope* arrayp, VAccess access) {
+    // Return the element of 'arrayp' at the constant indices of 'selp'. Indices are already
+    // normalized by V3Width, so copying the original dimensions and selectors preserves bounds.
+    static AstNodeExpr* sameElement(const AstNodeExpr* selp, AstVarScope* arrayp, VAccess access) {
         FileLine* const flp = selp->fileline();
         if (const AstArraySel* const aselp = VN_CAST(selp, ArraySel)) {
             return new AstArraySel{flp, sameElement(aselp->fromp(), arrayp, access),
                                    aselp->bitp()->cloneTree(false)};
         }
+        UASSERT_OBJ(VN_IS(selp, VarRef), selp, "Expected constant-index whole element");
         return new AstVarRef{flp, arrayp, access};
     }
-    // Return the index of the element 'selp' in its array, flattened
-    static uint32_t flatIndex(const AstNodeExpr* selp) {
-        const AstArraySel* const aselp = VN_CAST(selp, ArraySel);
-        if (!aselp) return 0;
-        const AstNodeArrayDType* const dtypep
-            = VN_AS(aselp->fromp()->dtypep()->skipRefp(), NodeArrayDType);
-        return flatIndex(aselp->fromp()) * dtypep->elementsConst()
-               + VN_AS(aselp->bitp(), Const)->toUInt();
-    }
-    void prepareSchemeFlagArray(AstVarScope* vscp, VarScopeInfo& vscpInfo) {
-        UASSERT_OBJ(vscpInfo.m_scheme == Scheme::FlagArray, vscp, "Inconsistent NBA scheme");
+    void prepareSchemeFlagArray(AstVarScope* vscp, TargetInfo& targetInfo) {
+        UASSERT_OBJ(targetInfo.m_scheme == Scheme::FlagArray, vscp, "Inconsistent NBA scheme");
         FileLine* const flp = vscp->fileline();
         AstScope* const scopep = vscp->scopep();
         const std::string baseName = "__" + vscp->varp()->shortName();
         AstUnpackArrayDType* const dtypep = VN_AS(vscp->dtypep()->skipRefp(), UnpackArrayDType);
-        vscpInfo.flagArrayKit().flagsp
+        AstVarScope* const flagsp
             = m_dlyTmps.make(flp, scopep, flagArrayDType(dtypep), "Set" + baseName);
-        vscpInfo.flagArrayKit().flagsp->varp()->setIgnorePostWrite();
-        vscpInfo.flagArrayKit().valuesp
+        // BLOCKTEMP flags are zero-initialized even with --x-initial unique. The post clear
+        // must not feed combinational scheduling; V3Order still records the raw MT accesses.
+        flagsp->varp()->setIgnorePostWrite();
+        targetInfo.flagArrayKit().flagsp = flagsp;
+        targetInfo.flagArrayKit().valuesp
             = m_dlyTmps.make(flp, scopep, vscp->dtypep(), "Val" + baseName);
-        // Create the AstActive for the Post logic, populated later
-        AstActive* const activep = new AstActive{flp, "nba-flag-array", vscpInfo.senTreep()};
-        activep->senTreeStorep(vscpInfo.senTreep());
+        AstActive* const activep = new AstActive{flp, "nba-flag-array", targetInfo.senTreep()};
+        activep->senTreeStorep(targetInfo.senTreep());
         scopep->addBlocksp(activep);
         AstAlwaysPost* const postp = new AstAlwaysPost{flp};
-        activep->addStmtsp(postp);
-        vscpInfo.flagArrayKit().postp = postp;
+        activep->addProcsp(postp);
+        targetInfo.flagArrayKit().postp = postp;
     }
-    void convertSchemeFlagArray(AstAssignDly* nodep, AstVarScope* vscp, VarScopeInfo& vscpInfo) {
-        UASSERT_OBJ(vscpInfo.m_scheme == Scheme::FlagArray, vscp, "Inconsistent NBA scheme");
+    void convertSchemeFlagArray(const NBA& nba, TargetInfo& targetInfo) {
+        AstAssignDly* nodep = VN_AS(nba.nodep, AssignDly);
+        AstVarScope* const vscp = VN_AS(nba.targetp, VarRef)->varScopep();
+        UASSERT_OBJ(targetInfo.m_scheme == Scheme::FlagArray, vscp, "Inconsistent NBA scheme");
         FileLine* const flp = nodep->fileline();
-        AstVarScope* const flagsp = vscpInfo.flagArrayKit().flagsp;
-        AstVarScope* const valuesp = vscpInfo.flagArrayKit().valuesp;
-        // The target element, its indices are constant, see visit(AstAssignDly*)
+        AstVarScope* const flagsp = targetInfo.flagArrayKit().flagsp;
+        AstVarScope* const valuesp = targetInfo.flagArrayKit().valuesp;
         AstNodeExpr* const lhsp = nodep->lhsp()->unlinkFrBack();
-        // Record the value and set the flag at the original NBA
+        // Evaluate the RHS once at the original NBA. Later writes to the same element replace
+        // the captured value in execution order; all indices are constant.
         nodep->addHereThisAsNext(new AstAssign{flp, sameElement(lhsp, valuesp, VAccess::WRITE),
                                                nodep->rhsp()->unlinkFrBack()});
         nodep->addHereThisAsNext(new AstAssign{flp, sameElement(lhsp, flagsp, VAccess::WRITE),
                                                new AstConst{flp, AstConst::BitTrue{}}});
         VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
-        // Add the 'Post' scheduled commit, clearing the flag, once per element
-        if (!m_flagArrayElems.emplace(vscp, flatIndex(lhsp)).second) {
+        std::vector<uint32_t> indices;
+        for (const AstArraySel* selp = VN_CAST(lhsp, ArraySel); selp;
+             selp = VN_CAST(selp->fromp(), ArraySel)) {
+            indices.push_back(VN_AS(selp->bitp(), Const)->toUInt());
+        }
+        if (!m_flagArrayElems.emplace(vscp, indices).second) {
             VL_DO_DANGLING(pushDeletep(lhsp), lhsp);
             return;
         }
+        // Commit and clear once per element, so disabled writes leave the target untouched.
         AstIf* const ifp = new AstIf{flp, sameElement(lhsp, flagsp, VAccess::READ)};
         ifp->addThensp(new AstAssign{flp, sameElement(lhsp, flagsp, VAccess::WRITE),
                                      new AstConst{flp, AstConst::BitFalse{}}});
         ifp->addThensp(new AstAssign{flp, lhsp, sameElement(lhsp, valuesp, VAccess::READ)});
-        vscpInfo.flagArrayKit().postp->addStmtsp(ifp);
+        targetInfo.flagArrayKit().postp->addStmtsp(ifp);
     }
 
     // Scheme::FlagShared
@@ -1628,7 +1686,7 @@ class DelayedRewrite final : public VNDeleter, public DelayedBase {
             }
             case Scheme::FlagArray: {
                 ++m_nSchemeFlagArray;
-                prepareSchemeFlagArray(vscp, vscpInfo);
+                prepareSchemeFlagArray(vscp, targetInfo);
                 break;
             }
             case Scheme::FlagShared: {
@@ -1675,7 +1733,7 @@ class DelayedRewrite final : public VNDeleter, public DelayedBase {
                 break;
             }
             case Scheme::FlagArray: {
-                convertSchemeFlagArray(nbap, vscp, vscpInfo);
+                convertSchemeFlagArray(nba, targetInfo);
                 break;
             }
             case Scheme::FlagShared: {

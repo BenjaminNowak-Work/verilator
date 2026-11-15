@@ -313,6 +313,33 @@ static AstNodeStmt* newIfAssertFailOn(AstNodeStmt* bodyp, VAssertDirectiveType d
     return ifp;
 }
 
+// True if nodep is a global clocking future sampled value function (IEEE 1800-2023 16.9.4)
+static bool isFutureValueFn(const AstNode* nodep) {
+    return VN_IS(nodep, Future) || VN_IS(nodep, Rising) || VN_IS(nodep, Falling)
+           || VN_IS(nodep, Steady);
+}
+
+// Return the fail action of an assertion without one
+static AstNodeStmt* newDefaultFailp(FileLine* flp, AstNodeModule* modp, const string& message) {
+    // V3Assert turns the DT_ERROR display into the standard "Assertion failed in %m"
+    AstDisplay* const dispp
+        = new AstDisplay{flp, VDisplayType::DT_ERROR, message, nullptr, nullptr};
+    dispp->fmtp()->timeunit(modp->timeunit());
+    AstNodeStmt* const stmtsp = dispp;
+    if (v3Global.opt.stopFail()) stmtsp->addNext(new AstStop{flp, false});
+    return stmtsp;
+}
+
+// Prepend stmtsp to the fail action, keeping the default one of an assertion without 'else'
+static void prependFailAction(AstAssert* assertp, AstNodeModule* modp, AstNodeStmt* stmtsp) {
+    // Without 'else', a failure calls $error (IEEE 1800-2023 16.14.1), which V3Assert adds only
+    // to an assertion with no fail action
+    if (!assertp->failsp()) {
+        assertp->addFailsp(newDefaultFailp(assertp->fileline(), modp, "'assert' failed."));
+    }
+    assertp->prependFailsp(stmtsp);
+}
+
 //######################################################################
 // NFA Builder
 
@@ -342,7 +369,6 @@ class SvaNfaBuilder final {
     // Unsupported endpoint topology must reject, not ignore, or the wait hangs
     bool m_isSeqEvent = false;
     bool m_inSequencePrefix = false;  // Prefix composition does not preserve every endpoint
-    bool m_inAntecedent = false;  // Building an implication antecedent, which does not reject
     bool m_wantBoolLeaf = false;  // Building a |-> / |=> or top-level body (see buildOrMerge)
     bool m_trackVacuous = false;  // Record vacuous successes (they fail a negated assertion)
     // Building an implication antecedent, which cannot fail, and every match of which counts
@@ -1148,11 +1174,12 @@ class SvaNfaBuilder final {
             [](const AstSConsRep* repp) { return getConstUInt(repp->countp()) == 0; });
     }
 
-    // True if a leaf's condition has no implication or multi-cycle sequence in it
+    // True if a leaf's condition has no implication, s_eventually or multi-cycle sequence in it
     // (a leaf can be e.g. 'not (x |-> y)')
     static bool isPlainBoolean(const AstNodeExpr* condp) {
-        return !condp->exists(
-            [](const AstNodeExpr* np) { return np->isMultiCycleSva() || VN_IS(np, Implication); });
+        return !condp->exists([](const AstNodeExpr* np) {
+            return np->isMultiCycleSva() || VN_IS(np, Implication) || VN_IS(np, SEventually);
+        });
     }
     // Build `b or p` at the end of an asserted property, with b boolean
     BuildResult buildBoolOrProp(AstNodeExpr* boolp, AstNodeExpr* propp, SvaStateVertex* entryVtxp,
@@ -1160,6 +1187,20 @@ class SvaNfaBuilder final {
         // It holds at once when b holds and otherwise exactly when p does (IEEE 1800-2023
         // 16.12.4). So p is evaluated only when b is false, with the rejections of a top-level
         // property.
+        // In a negated property, a success through b would not be counted with the vacuous
+        // successes of an implication in p, which fail it too.
+        const AstImplication* implp = nullptr;
+        if (m_trackVacuous) {
+            propp->exists([&implp](const AstImplication* np) {
+                if (!np->isFollowedBy()) implp = np;
+                return implp != nullptr;
+            });
+        }
+        if (implp) {
+            implp->v3warn(E_UNSUPPORTED, "Unsupported: implication inside another property "
+                                         "operator in a negated property");
+            return BuildResult::failWithError();
+        }
         SvaStateVertex* const propEntryp = scopedCreateVertex();
         guardedLink(entryVtxp, propEntryp,
                     new AstLogNot{flp, sampled(boolp->cloneTreePure(false))}, flp);
@@ -3216,9 +3257,14 @@ class SvaNfaLowering final {
 
         // Exact counts always count failures, from zero
         if (c.exactCounts) sigs.threadFailCountp = newTypedConstp(c.flp, m_u32DTypep, 0);
-        // Each terminal thread fails when the final condition is false.
+        // Each terminal thread fails when the final condition is false. A final condition with
+        // a future value function is only known one global clock tick later (see
+        // unloweredFuturep), so its failures are not counted: several on one tick run the fail
+        // action once.
         AstNodeExpr* terminalCountp = nullptr;
-        const bool needTerminalCount = needRejectCount && c.matchCondp;
+        const bool needTerminalCount
+            = needRejectCount && c.matchCondp
+              && !c.matchCondp->exists([](const AstNode* np) { return isFutureValueFn(np); });
         computeTerminalMatchAndReject(c, sigs, needMatchCount,
                                       needTerminalCount ? &terminalCountp : nullptr);
         if (terminalCountp) {
@@ -3261,9 +3307,9 @@ class SvaNfaLowering final {
                 AstNodeExpr*& keyFailp = failps[failKey(offsets, fromVtxp)];
                 keyFailp = orExprs(c.flp, keyFailp, rawFailp->cloneTreePure(false));
             }
-            failps.push_back(gateNotKill(c, rawFailp));
+            rejectps.push_back(gateNotKill(c, rawFailp));
         }
-        sigs.requiredStepRejectp = newOrTree(c.flp, failps.cbegin(), failps.cend());
+        sigs.requiredStepRejectp = newOrTree(c.flp, rejectps.cbegin(), rejectps.cend());
 
         computeThroughoutReject(c, sigs, needRejectCount, offsets, failps);
         for (const auto& it : failps) {
@@ -3641,12 +3687,7 @@ public:
                 dlyp->fileline(newfl);
             });
         } else {
-            // V3Assert turns the DT_ERROR display into the standard "Assertion failed in %m"
-            AstDisplay* const dispp
-                = new AstDisplay{flp, VDisplayType::DT_ERROR, "", nullptr, nullptr};
-            dispp->fmtp()->timeunit(m_modp->timeunit());
-            stmtsp = dispp;
-            if (v3Global.opt.stopFail()) stmtsp->addNext(new AstStop{flp, false});
+            stmtsp = newDefaultFailp(flp, m_modp, "");
         }
         // Like a failure during simulation, subject to $assertcontrol FailOff
         return newIfAssertFailOn(stmtsp, assertp->directive(), assertp->userType());
@@ -3956,7 +3997,7 @@ class AssertNfaVisitor final : public VNVisitor {
     }
 
     void inlineNamedProperty(AstPropSpec* outerSpecp, AstSchemaRef* schemaRefp,
-                             const AstProperty* propyp) {
+                             AstProperty* propyp) {
         // Recursion guard: IEEE 1800-2023 16.12.1 forbids recursive properties.
         // V3Width emits "Recursive property call" for direct recursion before this
         // pass runs; this catches any nested-inlining cycle that slips past.
@@ -4044,7 +4085,7 @@ class AssertNfaVisitor final : public VNVisitor {
             }
         });
         for (AstSchemaRef* const schemaRefp : schemaRefps) {
-            const AstProperty* const propyp = VN_AS(schemaRefp->schemap(), Property);
+            AstProperty* const propyp = VN_AS(schemaRefp->schemap(), Property);
             const AstPropSpec* const bodySpecp = propyp->specp();
             if (bodySpecp->sensesp() || bodySpecp->disablep()
                 || bodySpecp->propStrength() != VPropStrength::DEFAULT
@@ -4216,8 +4257,8 @@ class AssertNfaVisitor final : public VNVisitor {
         return !hasMultiCycleExpr(parts.triggerExprp);
     }
 
-    static void splitImplicationPassActions(AstAssert* assertp, const PropertyParts& parts,
-                                            AstNodeExpr* nonvacuousMatchp) {
+    void splitImplicationPassActions(AstAssert* assertp, const PropertyParts& parts,
+                                     AstNodeExpr* nonvacuousMatchp) {
         FileLine* const flp = assertp->fileline();
 
         AstNodeStmt* const passsp = assertp->passsp()->unlinkFrBackWithNext();
@@ -4236,7 +4277,7 @@ class AssertNfaVisitor final : public VNVisitor {
                           /*vacuous=*/false);
         splitsp = AstNode::addNextNull<AstNodeStmt>(splitsp, nonvacuousp);
         // Another attempt failing on the same tick runs the fail action instead
-        assertp->prependFailsp(splitsp->cloneTree(true));
+        prependFailAction(assertp, m_modp, splitsp->cloneTree(true));
         assertp->addPasssp(splitsp);
     }
 
@@ -4381,48 +4422,8 @@ class AssertNfaVisitor final : public VNVisitor {
             assertp->addPasssp(ifp);
             // Fail-handler prefix for overlapping instances (IEEE 16.12):
             // fires when reject=1 && match=1 in the same cycle.
-            assertp->prependFailsp(ifp->cloneTree(false));
+            prependFailAction(assertp, m_modp, ifp->cloneTree(false));
         }
-    }
-
-    static bool splitsImplicationPasssp(const AstNodeCoverOrAssert* assertp,
-                                        const PropertyParts& parts) {
-        const AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
-        return assertAssertp && assertAssertp->passsp() && parts.hasImplication
-               && canSplitImplicationPassActions(parts);
-    }
-
-    // Takes ownership of outputp, and of matchp, matchCountp, failCountp and passCountp if
-    // non-null
-    void finishDirective(AstNodeCoverOrAssert* assertp, const PropertyParts& parts,
-                         AstSenTree* senTreep, AstNodeExpr* outputp, AstNodeExpr* matchp,
-                         AstNodeExpr* matchCountp, AstNodeExpr* failCountp,
-                         AstNodeExpr* passCountp) {
-        AstNodeExpr* outputExprp = outputp;
-        FileLine* const flp = assertp->fileline();
-        AstPropSpec* const propp = VN_AS(assertp->propp(), PropSpec);
-        AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
-        if (countsMatches(assertp)) {
-            UASSERT_OBJ(matchCountp, assertp, "Cover sequence missing match count");
-            VL_DO_DANGLING(outputExprp->deleteTree(), outputExprp);
-            propp->matchCountp(matchCountp);
-            outputExprp = new AstNeq{flp, matchCountp->cloneTreePure(false),
-                                     newTypedConstp(flp, matchCountp->dtypep(), 0)};
-        } else if (matchCountp) {
-            propp->matchCountp(matchCountp);
-        }
-
-        const bool splitImplicationPasssp = splitsImplicationPasssp(assertp, parts);
-        if (assertAssertp) {
-            attachActionHandlers(assertAssertp, splitImplicationPasssp ? nullptr : matchp,
-                                 senTreep, failCountp, passCountp);
-        }
-        // After the replays, which clone the fail action without the pass action prefix
-        if (splitImplicationPasssp) splitImplicationPassActions(assertAssertp, parts, matchp);
-
-        AstNode* const innerPropp = propp->propp();
-        innerPropp->replaceWith(outputExprp);
-        VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
     }
 
     // Value of a local variable assigned by a lowered match item
@@ -4459,6 +4460,47 @@ class AssertNfaVisitor final : public VNVisitor {
                                          << (VN_IS(nodep, SExpr) ? "non-constant cycle delay"
                                                                  : "composite sequence operator")
                                          << " in " << wherep << " (IEEE 1800-2023 16.10)");
+    }
+
+    static bool splitsImplicationPasssp(const AstNodeCoverOrAssert* assertp,
+                                        const PropertyParts& parts) {
+        const AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
+        return assertAssertp && assertAssertp->passsp() && parts.hasImplication
+               && canSplitImplicationPassActions(parts);
+    }
+
+    // Takes ownership of outputp, and of matchp, matchCountp, failCountp and passCountp if
+    // non-null. failCountp and passCountp count the failures and passes on a tick, to replay
+    // their action blocks.
+    void finishDirective(AstNodeCoverOrAssert* assertp, const PropertyParts& parts,
+                         AstSenTree* senTreep, AstNodeExpr* outputp, AstNodeExpr* matchp,
+                         AstNodeExpr* matchCountp, AstNodeExpr* failCountp,
+                         AstNodeExpr* passCountp) {
+        AstNodeExpr* outputExprp = outputp;
+        FileLine* const flp = assertp->fileline();
+        AstPropSpec* const propp = VN_AS(assertp->propp(), PropSpec);
+        AstAssert* const assertAssertp = VN_CAST(assertp, Assert);
+        if (countsMatches(assertp)) {
+            UASSERT_OBJ(matchCountp, assertp, "Cover sequence missing match count");
+            VL_DO_DANGLING(outputExprp->deleteTree(), outputExprp);
+            propp->matchCountp(matchCountp);
+            outputExprp = new AstNeq{flp, matchCountp->cloneTreePure(false),
+                                     newTypedConstp(flp, matchCountp->dtypep(), 0)};
+        } else if (matchCountp) {
+            propp->matchCountp(matchCountp);
+        }
+
+        const bool splitImplicationPasssp = splitsImplicationPasssp(assertp, parts);
+        if (assertAssertp) {
+            attachActionHandlers(assertAssertp, splitImplicationPasssp ? nullptr : matchp,
+                                 senTreep, failCountp, passCountp);
+        }
+        // After the replays, which clone the fail action without the pass action prefix
+        if (splitImplicationPasssp) splitImplicationPassActions(assertAssertp, parts, matchp);
+
+        AstNode* const innerPropp = propp->propp();
+        innerPropp->replaceWith(outputExprp);
+        VL_DO_DANGLING(pushDeletep(innerPropp), innerPropp);
     }
 
     // Replace a VarRef to a captured local var at cycle K, returning the replacement
@@ -4507,14 +4549,6 @@ class AssertNfaVisitor final : public VNVisitor {
             if (AstNodeExpr* prep = sexprp->preExprp()) {
                 preLen = walkSubstituteMatchItems(prep, K, walk);
                 if (preLen < 0) return -1;
-                // A match item here reassigns its variables for the rest
-                if (const AstExprStmt* const stmtp = assignMatchItem(prep)) {
-                    reassignedItems = matchItems;
-                    for (const auto& itemr : matchItemsOf(stmtp)) {
-                        reassignedItems.erase(itemr.first);
-                    }
-                    bodyItemsp = &reassignedItems;
-                }
             }
             unsigned delayCycles = 0;
             if (delayp->isRangeDelay()) {
@@ -4822,7 +4856,7 @@ class AssertNfaVisitor final : public VNVisitor {
 
         // Substitute property-local match-item refs in consequent with
         // $past(rhs, K) before NFA build (IEEE 1800-2023 16.10).
-        if (liftMatchItemSubstitutions(parts, seqBodyp) || liftSeqMatchItems(propp->propp())) {
+        if (liftMatchItemSubstitutions(parts, seqBodyp)) {
             AstPropSpec* const psp = VN_CAST(assertp->propp(), PropSpec);
             UASSERT_OBJ(psp, assertp, "Concurrent assertion must have PropSpec");
             replaceBodyOnBuildError(assertp->fileline(), psp, /*errorEmitted=*/true);
@@ -4988,6 +5022,11 @@ class AssertNfaVisitor final : public VNVisitor {
         iterateChildren(nodep);
     }
     void visit(AstAlways* nodep) override {
+        // The process of a concurrent assertion item is not a procedural context
+        if (nodep->keyword() == VAlwaysKwd::ASSERT_COVER) {
+            iterateChildren(nodep);
+            return;
+        }
         VL_RESTORER(m_alwaysp);
         VL_RESTORER(m_alwaysClockp);
         m_alwaysp = nodep;

@@ -1274,10 +1274,10 @@ private:
                 if (index >= static_cast<uint32_t>(elements)) {
                     return nullptr;  // Ignore a write out of bounds (IEEE 1800-2023 7.4.6)
                 }
-                itemp = consp->valuep(indexNum.toUInt());
+                itemp = consp->valuep(index);
                 if (itemp == consp->defaultp()) {  // Make a defaulted element explicit
                     itemp = itemp->cloneTree(false);
-                    consp->valuep(indexNum.toUInt(), itemp);
+                    consp->valuep(index, itemp);
                 }
             } else {
                 itemp = VN_AS(itemp, ConsStruct)->memberValuep(selp->name());
