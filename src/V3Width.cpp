@@ -7844,8 +7844,8 @@ class WidthVisitor final : public VNVisitor {
         AstWith* const withp = new AstWith{fl, indexArgp, valueArgp, valueArgp->cloneTree(false)};
         withp->dtypep(elemDtp);
         {
-            VL_RESTORER(m_withp);
-            m_withp = withp;
+            VL_RESTORER_COPY(m_withArgps);
+            m_withArgps[valueArgp->name()] = valueArgp;
             iterateCheckTyped(withp, "element", withp->exprp(), elemDtp, FINAL);
         }
         AstCMethodHard* const mapp = new AstCMethodHard{fl, valuep, VCMethod::ARRAY_MAP};
