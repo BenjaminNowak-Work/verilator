@@ -391,6 +391,7 @@ class WidthVisitor final : public VNVisitor {
     const AstEnumItem* m_enumItemp = nullptr;  // Current enum item
     AstNodeFTask* m_ftaskp = nullptr;  // Current function/task
     AstProperty* m_propertyp = nullptr;  // Current property
+    bool m_underConcAssert = false;  // Visiting a concurrent assertion expression
     AstNodeModule* m_modep = nullptr;  // Current module
     const AstConstraint* m_constraintp = nullptr;  // Current constraint
     bool m_inConstraintExpr = false;  // Under a class or inline ('with') constraint expression
@@ -5110,6 +5111,12 @@ class WidthVisitor final : public VNVisitor {
         nodep->replaceWith(new AstConst{nodep->fileline(), AstConst::BitFalse{}});
         VL_DO_DANGLING(pushDeletep(nodep), nodep);
     }
+    // Report a non-static class member referenced in a concurrent assertion
+    void checkConcAssertClassMember(const AstNode* nodep) {
+        if (!m_underConcAssert) return;
+        nodep->v3error("Concurrent assertion expression references non-static class member "
+                       << nodep->prettyNameQ() << " (IEEE 1800-2023 16.6)");
+    }
     bool memberRefClass(AstMemberRef* nodep, AstClassRefDType* adtypep) {
         if (nodep->name() == "rand_mode" || nodep->name() == "randomize") {
             AstMethodCall* const newp = new AstMethodCall{
@@ -5143,6 +5150,7 @@ class WidthVisitor final : public VNVisitor {
                                                           << nodep->prettyNameQ()
                                                           << " (IEEE 1800-2023 6.20.6)");
                     }
+                    checkConcAssertClassMember(nodep);
                     nodep->dtypep(foundp->dtypep());
                     nodep->varp(varp);
                     nodep->didWidth(true);
@@ -6292,6 +6300,7 @@ class WidthVisitor final : public VNVisitor {
                     // Resolved here, as a caller may not iterate the replacement
                     userIterate(newp, m_vup);
                 } else {
+                    checkConcAssertClassMember(nodep);
                     nodep->taskp(ftaskp);
                     nodep->dtypeFrom(ftaskp);
                     nodep->classOrPackagep(classp);
@@ -7706,7 +7715,11 @@ class WidthVisitor final : public VNVisitor {
                 untilp->replaceWith(new AstConst{untilp->fileline(), AstConst::BitFalse{}});
                 VL_DO_DANGLING(pushDeletep(untilp), untilp);
             }
-            iterateCheckBool(nodep, "Property", nodep->propp(), BOTH);
+            {
+                VL_RESTORER(m_underConcAssert);
+                m_underConcAssert = true;
+                iterateCheckBool(nodep, "Property", nodep->propp(), BOTH);
+            }
             // A whole property 'always p' is reduced to p, once its bounds are constant. The
             // whole property of a property declaration is reduced only where it is instanced as
             // a whole property.
@@ -8896,6 +8909,9 @@ class WidthVisitor final : public VNVisitor {
             nodep->didWidth(true);
             return;
         }
+        // A body widthed from a call in an assertion is not part of the assertion expression
+        VL_RESTORER(m_underConcAssert);
+        m_underConcAssert = false;
         if (nodep->classMethod() && nodep->name() == "rand_mode") {
             nodep->v3error("The 'rand_mode' method is built-in and cannot be overridden"
                            " (IEEE 1800-2023 18.8)");
