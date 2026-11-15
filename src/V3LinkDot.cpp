@@ -5096,8 +5096,11 @@ class LinkDotResolveVisitor final : public VNVisitor {
                                                           << cellp->modp()->prettyNameQ());
                     }
                 }
-            } else if (allowScope && !allowFTask && VN_IS(foundp->nodep(), NodeFTask)) {
+            } else if (allowScope && !allowFTask
+                       && (VN_IS(foundp->nodep(), NodeFTask)
+                           || VN_IS(foundp->nodep(), NodeSchema))) {
                 // Function/task used as scope for static variable access (IEEE std 1800-2017 6.21)
+                // Also a sequence or property, as the scope of its items and methods
                 // Don't set m_dotText so the static variable resolves as a VarRef rather than
                 // VarXRef. This is so that V3Begin won't move it out of the function/task's scope.
                 ok = true;
