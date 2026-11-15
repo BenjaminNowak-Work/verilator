@@ -3634,6 +3634,17 @@ class WidthVisitor final : public VNVisitor {
                 nodep->replaceWith(newp);
                 VL_DO_DANGLING(pushDeletep(nodep), nodep);
                 return;
+            } else if (dynamicAssignable) {
+                // Converted as assigned: a fixed-size array as to a queue, while a dynamic array
+                // and an unbounded queue share a representation
+                newp = nodep->fromp()->unlinkFrBack();
+                if (VN_IS(fromDtp, UnpackArrayDType)) {
+                    newp = new AstCvtUnpackToQueue{nodep->fileline(), newp, toDtp};
+                }
+                newp->dtypeFrom(nodep);
+                nodep->replaceWith(newp);
+                VL_DO_DANGLING(pushDeletep(nodep), nodep);
+                return;
             } else if (AstBasicDType* const basicp = toDtp->basicp()) {
                 if (basicp->isDouble() && fromDtp->isString()) {
                     AstNodeExpr* const fromp = nodep->fromp()->unlinkFrBack();
@@ -3706,6 +3717,8 @@ class WidthVisitor final : public VNVisitor {
                                                   dstElementBits,
                                                   srcElementBits};
                 }
+            } else if (VN_IS(toDtp, DynArrayDType)) {
+                // Same representation as a queue, can just remove cast
             } else if (VN_IS(toDtp, ClassRefDType) || castable.isSameish()) {
                 // Can just remove cast
             } else {
