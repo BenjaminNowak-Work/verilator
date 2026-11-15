@@ -1956,6 +1956,7 @@ class RandomizeVisitor final : public VNVisitor {
         // With fieldDtp, randomize only the packed field of that type at bit lsb of exprp
         if (!fieldDtp) fieldDtp = exprp->dtypep();
         AstNodeDType* const memberDtp = fieldDtp->skipRefp();
+        const AstPackArrayDType* const packArrayDtp = VN_CAST(memberDtp, PackArrayDType);
         if (const auto* const structDtp = VN_CAST(memberDtp, StructDType)) {
             AstNodeStmt* stmtsp = nullptr;
             for (AstMemberDType* const smemberp : structDtp->memberspList()) {
