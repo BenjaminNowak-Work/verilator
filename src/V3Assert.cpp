@@ -106,33 +106,22 @@ class SeqEventLowerVisitor final : public VNVisitor {
         iterateChildren(nodep);
     }
     void visit(AstSenItem* nodep) override {
-        AstSchemaRef* const schemaRefp = VN_CAST(nodep->sensp(), SchemaRef);
+        AstSchemaRef* schemaRefp = VN_CAST(nodep->sensp(), SchemaRef);
         if (schemaRefp && VN_IS(schemaRefp->schemap(), Sequence)) {
             FileLine* const flp = nodep->fileline();
-            AstVar* const eventp = new AstVar{flp, VVarType::MODULETEMP, m_names.get(nodep),
-                                              m_modp->findBasicDType(VBasicDTypeKwd::EVENT)};
-            eventp->lifetime(VLifetime::STATIC_EXPLICIT);
-            m_modp->addStmtsp(eventp);
-            v3Global.setHasEvents();
             schemaRefp->unlinkFrBack();
-            nodep->sensp(new AstVarRef{flp, eventp, VAccess::READ});
             const bool automaticActual = schemaRefp->exists([](const AstNodeVarRef* refp) {
                 return refp->varp() && refp->varp()->lifetime().isAutomatic();
             });
             if (automaticActual) {
                 nodep->v3error("Arguments to a sequence used as an event control must be"
                                " static (IEEE 1800-2023 9.4.2.4)");
-                VL_DO_DANGLING(pushDeletep(schemaRefp), schemaRefp);
-                return;
+                // Null: no sequence to fire
+                VL_DO_CLEAR(pushDeletep(schemaRefp), schemaRefp = nullptr);
             }
-            AstFireEvent* const firep
-                = new AstFireEvent{flp, new AstVarRef{flp, eventp, VAccess::WRITE}, false};
-            AstCover* const coverp
-                = new AstCover{flp, new AstPropSpec{flp, nullptr, nullptr, schemaRefp}, firep,
-                               VAssertType::CONCURRENT};
-            coverp->isCoverSeq(true);
-            coverp->isSeqEvent(true);
-            m_modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ASSERT_COVER, nullptr, coverp});
+            AstVar* const eventp
+                = V3AssertCommon::newSequenceEvent(flp, m_modp, m_names.get(nodep), schemaRefp);
+            nodep->sensp(new AstVarRef{flp, eventp, VAccess::READ});
             return;
         }
         iterateChildren(nodep);
@@ -162,6 +151,25 @@ AstClocking* V3AssertCommon::moduleDefaultClockingp(const AstNodeModule* modp) {
 void V3AssertCommon::lowerSequenceEvents(AstNetlist* nodep) {
     { SeqEventLowerVisitor{nodep}; }
     V3Global::dumpCheckGlobalTree("assertseqevent", 0, dumpTreeEitherLevel() >= 3);
+}
+
+AstVar* V3AssertCommon::newSequenceEvent(FileLine* flp, AstNodeModule* modp, const string& name,
+                                         AstSchemaRef* schemaRefp) {
+    // The event is fired by an internal cover sequence (IEEE 1800-2023 9.4.2.4)
+    AstVar* const eventp
+        = new AstVar{flp, VVarType::MODULETEMP, name, modp->findBasicDType(VBasicDTypeKwd::EVENT)};
+    eventp->lifetime(VLifetime::STATIC_EXPLICIT);
+    modp->addStmtsp(eventp);
+    v3Global.setHasEvents();
+    if (!schemaRefp) return eventp;
+    AstFireEvent* const firep
+        = new AstFireEvent{flp, new AstVarRef{flp, eventp, VAccess::WRITE}, false};
+    AstCover* const coverp = new AstCover{flp, new AstPropSpec{flp, nullptr, nullptr, schemaRefp},
+                                          firep, VAssertType::CONCURRENT};
+    coverp->isCoverSeq(true);
+    coverp->isSeqEvent(true);
+    modp->addStmtsp(new AstAlways{flp, VAlwaysKwd::ASSERT_COVER, nullptr, coverp});
+    return eventp;
 }
 
 string V3AssertCommon::assertCtlGetCall(const char* query, VAssertType type,
