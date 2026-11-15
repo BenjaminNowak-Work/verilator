@@ -4305,6 +4305,14 @@ class AssertNfaVisitor final : public VNVisitor {
         const char* const propertyControlp
             = unsupportedPropertyControl(assertp, seqBodyp, negated);
 
+        if (const AstNode* const futurep = unloweredFuturep(propp, parts)) {
+            futurep->v3warn(E_UNSUPPORTED, "Unsupported: future sampled value function in a"
+                                           " multi-cycle property, other than in a boolean"
+                                           " implication consequent");
+            replaceBodyOnBuildError(assertp->fileline(), propp, /*errorEmitted=*/true);
+            return;
+        }
+
         // Substitute property-local match-item refs in consequent with
         // $past(rhs, K) before NFA build (IEEE 1800-2023 16.10).
         if (liftMatchItemSubstitutions(parts, seqBodyp) || liftSeqMatchItems(propp->propp())) {
