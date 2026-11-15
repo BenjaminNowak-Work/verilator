@@ -2799,10 +2799,10 @@ class SvaNfaLowering final {
             }
             AstNodeExpr* const rejectCondp = newThroughoutRejectCondp(c, vtxp);
             if (needThreadFailCount && !vtxp->datap()->delayRingLiveCountVarp) {
-                AstNodeExpr*& vertexFailp = vertexFailps[vtxp->color()];
-                vertexFailp = orExprs(c.flp, vertexFailp,
-                                      new AstLogAnd{c.flp, stateExprp->cloneTreePure(false),
-                                                    rejectCondp->cloneTreePure(false)});
+                AstNodeExpr*& keyFailp = failps[failKey(offsets, vtxp)];
+                keyFailp = orExprs(c.flp, keyFailp,
+                                   new AstLogAnd{c.flp, stateExprp->cloneTreePure(false),
+                                                 rejectCondp->cloneTreePure(false)});
             } else if (needThreadFailCount) {
                 AstNodeExpr* countCondp = rejectCondp->cloneTreePure(false);
                 if (AstNodeExpr* const holdp = newRequiredStepsHoldp(c, vtxp)) {
@@ -2894,6 +2894,11 @@ class SvaNfaLowering final {
             }
         }
         return offsets;
+    }
+    // Key of the rejections of a vertex's threads, counted once per tick, see computeSignals
+    static int failKey(const std::vector<int>& offsets, const SvaStateVertex* vtxp) {
+        const int offset = offsets[vtxp->color()];
+        return offset >= 0 ? offset : -1 - vtxp->color();
     }
 
     // Number of attempts completing this tick, or nullptr if threads cannot tell
@@ -2988,15 +2993,15 @@ class SvaNfaLowering final {
                                     notCondp->cloneTreePure(false));
                 }
             } else if (needThreadFailCount) {
-                AstNodeExpr*& vertexFailp = vertexFailps[fromVtxp->color()];
-                vertexFailp = orExprs(c.flp, vertexFailp, rawFailp->cloneTreePure(false));
+                AstNodeExpr*& keyFailp = failps[failKey(offsets, fromVtxp)];
+                keyFailp = orExprs(c.flp, keyFailp, rawFailp->cloneTreePure(false));
             }
             failps.push_back(gateNotKill(c, rawFailp));
         }
         sigs.requiredStepRejectp = newOrTree(c.flp, failps.cbegin(), failps.cend());
 
-        computeThroughoutReject(c, sigs, needRejectCount, vertexFailps);
-        for (const auto& it : vertexFailps) {
+        computeThroughoutReject(c, sigs, needRejectCount, offsets, failps);
+        for (const auto& it : failps) {
             sigs.threadFailCountp
                 = addCountp(c.flp, sigs.threadFailCountp,
                             new AstExtend{c.flp, it.second, m_u32DTypep->width()});
