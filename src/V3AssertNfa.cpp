@@ -3459,6 +3459,7 @@ class AssertNfaVisitor final : public VNVisitor {
         });  // LCOV_EXCL_LINE -- gcov attributes lambda's implicit return to `})`
         V3AssertCommon::removeActualReductions(actualps);
 
+        V3AssertCommon::lowerSvaLocalVarInits(propyp, propSpecp, localVarMap);
         for (const auto& tconnect : tconnects) {
             pushDeletep(tconnect.second->exprp()->unlinkFrBack());
         }
@@ -4121,12 +4122,11 @@ class AssertNfaVisitor final : public VNVisitor {
     // Returns the PropSpec to lower, or nullptr when fully handled here.
     AstPropSpec* prepareAssertionProp(AstNodeCoverOrAssert* assertp) {
         // Repeat, as the inlined body may itself be only a property instance
-        while (AstPropSpec* const specp = VN_CAST(assertp->propp(), PropSpec)) {
+        while (true) {
+            AstPropSpec* const specp = VN_AS(assertp->propp(), PropSpec);
             AstSchemaRef* const schemaRefp = VN_CAST(specp->propp(), SchemaRef);
-            if (!schemaRefp) break;
-            const AstProperty* const propyp = VN_CAST(schemaRefp->schemap(), Property);
-            if (!propyp) break;
-            inlineNamedProperty(specp, schemaRefp, propyp);
+            if (!schemaRefp || !VN_IS(schemaRefp->schemap(), Property)) break;
+            inlineNamedProperty(specp, schemaRefp, VN_AS(schemaRefp->schemap(), Property));
         }
 
         inlineNestedPropertyRefs(assertp->propp());
