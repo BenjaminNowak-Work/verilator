@@ -3448,12 +3448,10 @@ class AssertNfaVisitor final : public VNVisitor {
         if (outerSpecp->sensesp() && propSpecp->sensesp()) {
             outerSpecp->v3warn(E_UNSUPPORTED,
                                "Unsupported: Clock event before property call and in its body");
-            pushDeletep(propSpecp->sensesp()->unlinkFrBack());
+            pushDeletep(propSpecp->sensesp()->unlinkFrBackWithNext());
         }
         if (outerSpecp->sensesp()) {
-            AstSenItem* const sensesp = outerSpecp->sensesp();
-            sensesp->unlinkFrBack();
-            propSpecp->sensesp(sensesp);
+            propSpecp->addSensesp(outerSpecp->sensesp()->unlinkFrBackWithNext());
         }
 
         outerSpecp->replaceWith(propSpecp);
@@ -3716,7 +3714,7 @@ class AssertNfaVisitor final : public VNVisitor {
                     return true;
                 }
             }
-            specp->sensesp(clockedp->sensesp()->unlinkFrBackWithNext());
+            specp->addSensesp(clockedp->sensesp()->unlinkFrBackWithNext());
             AstNodeExpr* const bodyp = clockedp->exprp()->unlinkFrBack();
             clockedp->replaceWith(bodyp);
             VL_DO_DANGLING(pushDeletep(clockedp), clockedp);
@@ -4244,7 +4242,7 @@ class AssertNfaVisitor final : public VNVisitor {
         // Inherit module defaults (IEEE 14.12, 16.15) when assertion has none. A clock inferred
         // from the always procedure takes precedence over default clocking (IEEE 1800-2023 16.16).
         if (!propp->sensesp() && m_defaultClockingp && !m_alwaysClockp) {
-            propp->sensesp(m_defaultClockingp->sentreep()->sensesp()->cloneTree(true));
+            propp->addSensesp(m_defaultClockingp->sentreep()->sensesp()->cloneTree(true));
         }
         if (!propp->disablep() && m_defaultDisablep && !isSeqEvent) {
             propp->disablep(m_defaultDisablep->condp()->cloneTreePure(true));
