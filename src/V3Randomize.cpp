@@ -99,17 +99,13 @@ enum ClassRandom : uint8_t {
 // ######################################################################
 // Establishes the target of a rand_mode() call
 
-// Whether a packed type holds an enum, possibly inside packed arrays, structs or unions
+// Whether a packed type is an enum or a packed array of enums. An enum member of a packed
+// struct or union is not restricted to its values (IEEE 1800-2023 18.4).
 static bool packedHasEnum(const AstNodeDType* dtypep) {
     dtypep = dtypep->skipRefToEnump();
     if (VN_IS(dtypep, EnumDType)) return true;
     if (const AstPackArrayDType* const arrayDtp = VN_CAST(dtypep, PackArrayDType)) {
         return packedHasEnum(arrayDtp->subDTypep());
-    }
-    if (const AstNodeUOrStructDType* const structDtp = VN_CAST(dtypep, NodeUOrStructDType)) {
-        for (const AstMemberDType* const memberp : structDtp->memberspList()) {
-            if (packedHasEnum(memberp->subDTypep())) return true;
-        }
     }
     return false;
 }
@@ -1951,10 +1947,28 @@ class RandomizeVisitor final : public VNVisitor {
         if (!tempElementp->backp()) VL_DO_DANGLING(pushDeletep(tempElementp), tempElementp);
         return new AstForeach{fl, headerp, randStmtsp};
     }
+    // Randomize member memberVarp through refp, element by element if its elements have a
+    // rand_mode each
+    AstNodeStmt* newMemberRandStmtsp(FileLine* fl, AstVar* memberVarp, AstVarRef* refp,
+                                     AstVar* randcVarp, AstVar* const outputVarp) {
+        AstVar* const modeVarp = elemModeVarp(memberVarp);
+        AstNodeStmt* const stmtp
+            = modeVarp ? createArrayForeachLoop(
+                             fl, memberVarp->dtypep()->skipRefp(), refp,
+                             [&](AstNodeExpr* elemp) {
+                                 return newRandStmtsp(fl, elemp, nullptr, outputVarp);
+                             },
+                             modeVarp)
+                       : newRandStmtsp(fl, refp, randcVarp, outputVarp);
+        if (!refp->backp()) VL_DO_DANGLING(refp->deleteTree(), refp);
+        return stmtp;
+    }
     AstNodeStmt* newRandStmtsp(FileLine* fl, AstNodeExpr* exprp, AstVar* randcVarp,
                                AstVar* const outputVarp, int lsb = 0,
-                               AstNodeDType* fieldDtp = nullptr) {
-        // With fieldDtp, randomize only the packed field of that type at bit lsb of exprp
+                               AstNodeDType* fieldDtp = nullptr, bool enumValues = true) {
+        // With fieldDtp, randomize only the packed field of that type at bit lsb of exprp.
+        // An enum gets one of its values, unless in a packed struct or union (enumValues false,
+        // IEEE 1800-2023 18.4)
         if (!fieldDtp) fieldDtp = exprp->dtypep();
         AstNodeDType* const memberDtp = fieldDtp->skipRefp();
         const AstPackArrayDType* const packArrayDtp = VN_CAST(memberDtp, PackArrayDType);
@@ -1963,9 +1977,9 @@ class RandomizeVisitor final : public VNVisitor {
             for (AstMemberDType* const smemberp : structDtp->memberspList()) {
                 AstNodeStmt* randp = nullptr;
                 if (structDtp->packed()) {
-                    randp
-                        = newRandStmtsp(fl, stmtsp ? exprp->cloneTree(false) : exprp, nullptr,
-                                        outputVarp, lsb + smemberp->lsb(), smemberp->subDTypep());
+                    randp = newRandStmtsp(fl, stmtsp ? exprp->cloneTree(false) : exprp, nullptr,
+                                          outputVarp, lsb + smemberp->lsb(), smemberp->subDTypep(),
+                                          false);
                 } else if (smemberp->rand().isRandomizable()) {
                     // IEEE 1800-2023 18.4: an unpacked struct member is only
                     // randomized if its own declaration carries rand/randc.
@@ -1983,7 +1997,7 @@ class RandomizeVisitor final : public VNVisitor {
             // case; nothing valid to build a randomize statement for here.
             if (!unionDtp->packed()) return nullptr;
             return newRandStmtsp(fl, exprp, nullptr, outputVarp, lsb,
-                                 unionDtp->membersp()->subDTypep());
+                                 unionDtp->membersp()->subDTypep(), false);
         } else if (const AstClassRefDType* const classRefDtp = VN_CAST(memberDtp, ClassRefDType)) {
             AstFunc* const memberFuncp
                 = m_nullPhase != NullPhase::NONE
@@ -2043,7 +2057,9 @@ class RandomizeVisitor final : public VNVisitor {
             AstNodeExpr* valp;
             AstVar* randVarp = nullptr;  // Random value of an enum
             AstNodeStmt* randStmtsp = nullptr;  // Draws the random value, before the assignment
-            if (AstEnumDType* const enumDtp = VN_CAST(fieldDtp->skipRefToEnump(), EnumDType)) {
+            AstEnumDType* const enumDtp
+                = enumValues ? VN_CAST(fieldDtp->skipRefToEnump(), EnumDType) : nullptr;
+            if (enumDtp) {
                 // Random value in a variable: a wide value is copied word by word, each word
                 // evaluating the table index again
                 randVarp = new AstVar{fl, VVarType::BLOCKTEMP, m_uniqueNames.get("__VenumRand"),
@@ -2518,16 +2534,8 @@ class RandomizeVisitor final : public VNVisitor {
                 AstVar* const randcVarp = newRandcVarsp(memberVarp, nodep);
                 AstVarRef* const refp
                     = new AstVarRef{memberVarp->fileline(), classp, memberVarp, VAccess::WRITE};
-                AstVar* const modeVarp = elemModeVarp(memberVarp);
                 AstNodeStmt* const stmtp
-                    = modeVarp ? createArrayForeachLoop(
-                                     fl, memberVarp->dtypep()->skipRefp(), refp,
-                                     [&](AstNodeExpr* elemp) {
-                                         return newRandStmtsp(fl, elemp, nullptr, basicFvarp);
-                                     },
-                                     modeVarp)
-                               : newRandStmtsp(fl, refp, randcVarp, basicFvarp);
-                if (!refp->backp()) VL_DO_DANGLING(refp->deleteTree(), refp);
+                    = newMemberRandStmtsp(fl, memberVarp, refp, randcVarp, basicFvarp);
                 AstNodeStmt* blockp
                     = new AstBegin{fl, m_uniqueNames.get("__VrandBlock"), stmtp, false};
                 // Elements check the array's rand_mode themselves, unless they are objects
@@ -2872,7 +2880,9 @@ class RandomizeVisitor final : public VNVisitor {
                 if (!VN_IS(RandomizeUtil::arrayElementDTypep(memberVarp->dtypep()), ClassRefDType))
                     return;
                 AstVarRef* const refp = new AstVarRef{fl, ownerClassp, memberVarp, VAccess::READ};
-                AstNodeStmt* const stmtp = newRandStmtsp(fl, refp, nullptr, fvarp);
+                // The selected leaf's null and cycle flag are checked in newRandStmtsp.
+                AstNodeStmt* const stmtp
+                    = newMemberRandStmtsp(fl, memberVarp, refp, nullptr, fvarp);
                 funcp->addStmtsp(wrapIfRandMode(
                     classp, memberVarp,
                     new AstBegin{fl, m_uniqueNames.get("__VrandBlock"), stmtp, false}));
