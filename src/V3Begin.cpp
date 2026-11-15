@@ -75,6 +75,7 @@ class BeginVisitor final : public VNVisitor {
     string m_displayScope;  // Name of %m in $display/AstScopeName
     string m_namedScope;  // Name of begin blocks above us
     string m_unnamedScope;  // Name of begin blocks, including unnamed blocks
+    std::map<const AstNodeFTask*, string> m_forkBranchScopes;  // m_displayScope at the call
     int m_ifDepth = 0;  // Current if depth
 
     // METHODS
@@ -382,6 +383,8 @@ class BeginVisitor final : public VNVisitor {
     void visit(AstNodeFTaskRef* nodep) override {
         if (nodep->user1SetOnce()) return;
         m_ftaskRefps.push_back(nodep);
+        if (nodep->taskp()->forkBranch())
+            m_forkBranchScopes.emplace(nodep->taskp(), m_displayScope);
         iterateChildren(nodep);
     }
     void visit(AstIfaceRefDType* nodep) override {
