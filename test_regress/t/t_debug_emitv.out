@@ -63,6 +63,29 @@ module t;
             disable label0;
         end
     endfunction
+    function capture_enum;
+        input bit value;
+        begin : label1
+            capture_enum = /*CRESET*/;
+            capture_enum = (value ? ONE : ZERO);
+            disable label1;
+        end
+    endfunction
+    string capture_enum_text;
+    initial begin
+        capture_enum_text = $sformatf("%p", $_EXPRSTMT(
+                begin
+                    enum logic [2:0] {
+                        ZERO = 3'h0,
+                        ONE = 3'h1
+                    } __Venum_h2c2fce43__0;
+                    __Venum_h2c2fce43__0 = capture_enum(
+                                                        in);
+                end
+                , __Venum_h2c2fce43__0);
+        );
+        ;
+    end
     Iface the_ifaces[3] ();
     Iface the_ifaces[2] ();
     Iface the_ifaces[1] ();
@@ -80,7 +103,13 @@ module t;
                 $write("");
             end
             $display("%p", $_EXPRSTMT(
-                    __Venum_ha0f45658__0 = in;
+                    begin
+                        enum logic [2:0] {
+                            ZERO = 3'h0,
+                            ONE = 3'h1
+                        } __Venum_ha0f45658__0;
+                        __Venum_ha0f45658__0 = in;
+                    end
                     , __Venum_ha0f45658__0);
             );
             if ((| $value$plusargs("TEST=%d", i1))) begin
@@ -163,11 +192,11 @@ module t;
     endtask
     function f;
         input int v;
-        begin : label1
+        begin : label2
             $display("stmt");
             f = ((v == 32'sh0) ? 32'sh63 : ((~ v) + 
                                             32'sh1));
-            disable label1;
+            disable label2;
         end
     endfunction
     task refports;
@@ -181,17 +210,17 @@ module t;
     endtask
     function implicit_ports;
         input logic signed [3:0]  sa;
-        begin : label2
+        begin : label3
             implicit_ports = /*CRESET*/;
             implicit_ports = sa;
-            disable label2;
+            disable label3;
         end
     endfunction
     function signed_val;
-        begin : label3
+        begin : label4
             signed_val = /*CRESET*/;
             signed_val = $unsigned(8'((- 32'sh1)));
-            disable label3;
+            disable label4;
         end
     endfunction
     import "DPI-C" pure function int dpi_pure(input 
@@ -207,9 +236,9 @@ module t;
     export "DPI-C" function dpi_exported;
     function dpi_exported;
         input int a;
-        begin : label4
+        begin : label5
             dpi_exported = (a + 32'sh1);
-            disable label4;
+            disable label5;
         end
     endfunction
     export "DPI-C" task dpi_exported_task;
@@ -304,12 +333,12 @@ module t;
             begin : unnamedblk3
                 int i;
                 i = 32'sh0;
-                begin : label5
+                begin : label6
                     while ((i < cyc)) begin
                         begin
                             sum = (sum + i);
                             if ((sum > 32'sha)) begin
-                                disable label5;
+                                disable label6;
                             end
                             else begin
                                 sum = (sum + 32'sh1);
@@ -402,7 +431,7 @@ module t;
                 if ((SUB_B !== 2'h1)) begin
                     begin
                         $write("%%Error: %s:%0d:  got=%0d exp=%0d\n", "t/t_debug_emitv.v", 
-                               32'sh19b, SUB_B, 2'h1);
+                               32'sh1a1, SUB_B, 2'h1);
                         $stop;
                     end
                 end
@@ -1576,10 +1605,6 @@ module t;
             obj.delay_caller();
         end
     end
-    enum logic [2:0] {
-        ZERO = 3'h0,
-        ONE = 3'h1
-    } __Venum_ha0f45658__0;
 endmodule
 class Cls;
     bit cg_clk;
@@ -1746,10 +1771,10 @@ virtual class VBase;
 endclass
 class VDer extends VBase;
     function vfunc;
-        begin : label6
+        begin : label7
             vfunc = /*CRESET*/;
             vfunc = 32'sh1;
-            disable label6;
+            disable label7;
         end
     endfunction
     function new;
@@ -1758,10 +1783,10 @@ class VDer extends VBase;
 endclass
 class ClsExt extends Cls;
     function inherited;
-        begin : label7
+        begin : label8
             inherited = /*CRESET*/;
             inherited = (rmember1 + member);
-            disable label7;
+            disable label8;
         end
     endfunction
     function new;
@@ -1786,11 +1811,11 @@ endclass
 function rand_restricted;
     input Cls obj;
     input int member;
-    begin : label8
+    begin : label9
         rand_restricted = obj.randomize() with (
             ???? // CONSTRAINTEXPR
             (__Vrandwith_obj.rmember1 < member)) ;
-        disable label8;
+        disable label9;
     end
 endfunction
 class ClsParamExt extends ClsParam__Tz7d09f080_P2;
@@ -1800,7 +1825,7 @@ class ClsParamExt extends ClsParam__Tz7d09f080_P2;
 endclass
 function rand_reduce;
     input Cls obj;
-    begin : label9
+    begin : label10
         rand_reduce = obj.randomize() with (
             ???? // CONSTRAINTEXPR
             (__Vrandwith_obj.rarray.r_sum() with ((
@@ -1808,7 +1833,7 @@ function rand_reduce;
                                                    + 
                                                    __Vrandwith_obj.rmember1))  
              > 32'sh0)) ;
-        disable label9;
+        disable label10;
     end
 endfunction
 process __VprocessQueue_named__0[$];
@@ -1839,13 +1864,13 @@ module sub;
     endtask
     function f;
         input int v;
-        begin : label10
+        begin : label11
             if ((v == 32'sh0)) begin
                 f = 32'sh21;
-                disable label10;
+                disable label11;
             end
             f = ({32'h1{{31'h0, v[2]}}} + 32'h1);
-            disable label10;
+            disable label11;
         end
     endfunction
     real r;
@@ -1869,19 +1894,19 @@ package p;
     logic pkgvar;
     function ident;
         input int value;
-        begin : label11
+        begin : label12
             ident = /*CRESET*/;
             ident = value;
-            disable label11;
+            disable label12;
         end
     endfunction
     function uses_const_func;
         logic [1:0]  v;
-        begin : label12
+        begin : label13
             uses_const_func = /*CRESET*/;
             v = /*CRESET*/;
             uses_const_func = 32'h2;
-            disable label12;
+            disable label13;
         end
     endfunction
 endpackage
@@ -1910,7 +1935,7 @@ package std;
         protected chandle m_process;
         function self;
             process p;
-            begin : label13
+            begin : label14
                 self = /*CRESET*/;
                 p = /*CRESET*/;
                 $c(vlProcess->initFromSelf(p););
@@ -1922,7 +1947,7 @@ package std;
                     end
                 end
                 self = p;
-                disable label13;
+                disable label14;
             end
         endfunction
         task set_status;
@@ -1930,10 +1955,10 @@ package std;
             $c(m_process->state(s););
         endtask
         function status;
-            begin : label14
+            begin : label15
                 status = /*CRESET*/;
                 status = $c(m_process->state());
-                disable label14;
+                disable label15;
             end
         endfunction
         task kill;
@@ -1969,12 +1994,12 @@ package std;
         endtask
         function get_randstate;
             string s;
-            begin : label15
+            begin : label16
                 get_randstate = /*CRESET*/;
                 s = string'($c(0));
                 $c(s = m_process->randstate(););
                 get_randstate = s;
-                disable label15;
+                disable label16;
             end
         endfunction
         task set_randstate;
@@ -2013,7 +2038,7 @@ package std;
         endtask
         task get;
             input int keyCount;
-            begin : label16
+            begin : label17
                 dropKilled();
                 if (((m_keyCount >= keyCount) && ((
                                                    m_queue.size() 
@@ -2026,7 +2051,7 @@ package std;
                     begin
                         m_keyCount = (m_keyCount - 
                                       keyCount);
-                        disable label16;
+                        disable label17;
                     end
                 end
                 m_queue.push_back(
@@ -2053,15 +2078,15 @@ package std;
         endtask
         function try_get;
             input int keyCount;
-            begin : label17
+            begin : label18
                 try_get = /*CRESET*/;
                 if ((m_keyCount < keyCount)) begin
                     try_get = 32'sh0;
-                    disable label17;
+                    disable label18;
                 end
                 m_keyCount = (m_keyCount - keyCount);
                 try_get = 32'sh1;
-                disable label17;
+                disable label18;
             end
         endfunction
     endclass
