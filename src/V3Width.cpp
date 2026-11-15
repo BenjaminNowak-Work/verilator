@@ -375,10 +375,10 @@ class WidthVisitor final : public VNVisitor {
     std::unordered_map<const AstClass*, std::unordered_map<string, AstNodeFuncCovItem*>>
         m_coverItems;  // Coverpoints and crosses of each covergroup, by name
     V3TaskConnectState m_taskConnectState;  // State to cache V3Task::taskConnects
-    // Property whose untyped formal arguments must be typed with the actual arguments, see
-    // needsTypedFormals; false while computing
+    // Property or sequence whose untyped formal arguments must be typed with the actual
+    // arguments, see needsTypedFormals; false while computing
     std::map<const AstNodeSchema*, bool> m_needsTypedFormals;
-    // Copies of such a property with typed formal arguments, by actual argument types
+    // Copies of such a property or sequence with typed formal arguments, by actual argument types
     using TypedFormalCopy = std::pair<std::vector<AstNodeDType*>, AstNodeSchema*>;
     std::map<const AstNodeSchema*, std::vector<TypedFormalCopy>> m_typedFormalCopies;
     std::vector<AstNodeSchema*> m_untypedFormalDecls;  // Such declarations, deleted at the end
