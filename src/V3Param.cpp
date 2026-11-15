@@ -2635,6 +2635,14 @@ public:
     }
     void visitBaseQueued(bool flag) { m_visitBaseQueued = flag; }
 
+    // Report defparams whose path named no instance once generate loops were elaborated
+    void checkUnmatchedDefparams() {
+        // E.g. a loop index outside the loop's range. Mark each reported, to report it once.
+        for (FileLine* const flp : m_defparamsSeen) {
+            if (!m_defparamsMatched.emplace(flp).second) continue;
+            flp->v3error("In defparam, the path names no instance");
+        }
+    }
     // After an interface cell inside parentModp has been deparameterized
     // (rewired from template to clone), retarget REFDTYPEs that still
     // reference the old template's types so that $bits(iface_typedef)
@@ -2700,9 +2708,11 @@ public:
             std::set<const AstNode*> defparamParams;  // Parameters set by a defparam to this cell
             for (AstPin* const pinp : cellp->paramspList()) {
                 if (pinp->paramPath().empty()) continue;
+                m_defparamsSeen.emplace_back(pinp->fileline());
                 if (!defParamNames(pinp->paramPath(), instanceName)) {
                     VL_DO_DANGLING(pinp->unlinkFrBack()->deleteTree(), pinp);
                 } else {
+                    m_defparamsMatched.emplace(pinp->fileline());
                     defparamParams.emplace(paramOf(pinp));
                 }
             }
@@ -3467,7 +3477,7 @@ class ParamVisitor final : public VNVisitor {
             if (!cellParamsReferenceIfacePorts(cellp)) {
                 AstNodeModule* const srcModp = cellp->modp();
                 AstNodeModule* const newModp
-                    = m_processor.nodeDeparam(cellp, srcModp, m_modp, m_modp->someInstanceName());
+                    = m_processor.nodeDeparam(cellp, srcModp, m_modp, cellScopeName(cellp));
                 // Retarget template REFDTYPEs to the clone's types.
                 if (V3LinkDotIfaceCapture::enabled() && cellp->modp() != srcModp) {
                     m_processor.retargetIfaceRefs(m_modp, cellp->name());
@@ -3796,12 +3806,19 @@ class ParamVisitor final : public VNVisitor {
         return false;
     }
 
+    // Return the hierarchical name of the scope of a cell in the current module
+    string cellScopeName(const AstCell* cellp) const {
+        // Including generate blocks, as defparam paths are matched against it
+        const auto it = m_genHierNames.find(cellp);
+        return m_modp->someInstanceName()
+               + (it != m_genHierNames.end() ? it->second : m_generateHierName);
+    }
     void deparamIfaceCellNow(AstCell* cellp) {
         if (!cellp->paramsp()) return;
         if (!VN_IS(cellp->modp(), Iface)) return;
         AstNodeModule* const srcModp = cellp->modp();
         AstNodeModule* const newModp
-            = m_processor.nodeDeparam(cellp, srcModp, m_modp, m_modp->someInstanceName());
+            = m_processor.nodeDeparam(cellp, srcModp, m_modp, cellScopeName(cellp));
         if (newModp && newModp != srcModp) {
             if (V3LinkDotIfaceCapture::enabled()) {
                 m_processor.retargetIfaceRefs(m_modp, cellp->name());
@@ -4126,6 +4143,7 @@ public:
 
         // Relies on modules already being in top-down-order
         iterate(netlistp);
+        m_processor.checkUnmatchedDefparams();
     }
     ~ParamVisitor() override = default;
     ParamProcessor& processor() { return m_processor; }
