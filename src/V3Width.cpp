@@ -10133,7 +10133,8 @@ class WidthVisitor final : public VNVisitor {
             // A sequence event control (IEEE 1800-2023 9.4.2.4)
             const AstSchemaRef* const schemaRefp = VN_CAST(nodep->sensp(), SchemaRef);
             if (schemaRefp && VN_IS(schemaRefp->schemap(), Sequence)) m_underSvaExpr = true;
-            userIterateChildren(nodep, WidthVP{SELF, BOTH}.p());
+            userIterateAndNext(nodep->sensp(), WidthVP{SELF, BOTH}.p());
+            if (nodep->condp()) iterateCheckBool(nodep, "iff condition", nodep->condp(), BOTH);
             if (nodep->edgeType().anEdge()) {
                 AstNodeDType* const sensDtp = nodep->sensp()->dtypep()->skipRefp();
                 if (sensDtp->isDouble()) {
