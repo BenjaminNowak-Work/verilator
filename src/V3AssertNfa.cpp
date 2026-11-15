@@ -1196,17 +1196,251 @@ class SvaNfaBuilder final {
         return {mergeVtxp, nullptr, {}};
     }
 
+    // Collect the operands of nested sequence 'or's
+    static void collectOrOperands(AstNodeExpr* nodep, std::vector<AstNodeExpr*>& out) {
+        if (AstSOr* const orp = VN_CAST(nodep, SOr)) {
+            collectOrOperands(orp->lhsp(), out);
+            collectOrOperands(orp->rhsp(), out);
+        } else {
+            out.push_back(nodep);
+        }
+    }
+    // Operand of a sequence 'or' of fixed-length sequences of boolean leaves
+    struct FixedOrOperand final {
+        std::map<int, std::vector<AstNodeExpr*>> checks;  // Leaf checks by clock offset
+        int length = 0;  // Offset of its last clock tick
+    };
+    static constexpr size_t MAX_FIXED_OR_OPERANDS = 4;  // Limits the 2^n operand sets tracked
+    static constexpr size_t MAX_FIXED_OR_TRANSITIONS = 1024;  // Limits their transitions
+    // Sampled checks of an operand at clock offset 'offset', true if it has none there
+    static AstNodeExpr* newOperandCondp(const FixedOrOperand& op, int offset, FileLine* flp) {
+        const auto it = op.checks.find(offset);
+        if (it == op.checks.end()) return new AstConst{flp, AstConst::BitTrue{}};
+        AstNodeExpr* condp = nullptr;
+        for (AstNodeExpr* const leafp : it->second) {
+            AstNodeExpr* const clonep = sampled(leafp->cloneTreePure(false));
+            condp = condp ? new AstLogAnd{flp, condp, clonep} : clonep;
+        }
+        return condp;
+    }
+    // Whether any operand in 'mask' holds at clock offset 'offset'
+    static AstNodeExpr* newAnyHoldsp(const std::vector<FixedOrOperand>& ops, unsigned mask,
+                                     int offset, FileLine* flp) {
+        AstNodeExpr* condp = nullptr;
+        for (size_t i = 0; i < ops.size(); ++i) {
+            if (!(mask & (1U << i))) continue;
+            AstNodeExpr* const opp = newOperandCondp(ops[i], offset, flp);
+            condp = condp ? new AstLogOr{flp, condp, opp} : opp;
+        }
+        return condp;
+    }
+    // Whether every operand in 'mask' holds at clock offset 'offset', or fails if not 'holds'
+    static AstNodeExpr* newAllHoldp(const std::vector<FixedOrOperand>& ops, unsigned mask,
+                                    int offset, bool holds, FileLine* flp) {
+        AstNodeExpr* condp = nullptr;
+        for (size_t i = 0; i < ops.size(); ++i) {
+            if (!(mask & (1U << i))) continue;
+            AstNodeExpr* opp = newOperandCondp(ops[i], offset, flp);
+            if (!holds) opp = new AstLogNot{flp, opp};
+            condp = condp ? new AstLogAnd{flp, condp, opp} : opp;
+        }
+        return condp;
+    }
+    // `s ##N (s1 or s2 ...)` with a fixed cycle delay distributed over the operands of the 'or',
+    // or nullptr for other sequences. The caller owns the result.
+    static AstNodeExpr* newDistributedOrp(AstSExpr* sexprp) {
+        AstDelay* const delayp = VN_CAST(sexprp->delayp(), Delay);
+        if (!delayp || !delayp->isCycleDelay() || delayp->isRangeDelay()) return nullptr;
+        if (!VN_IS(sexprp->exprp(), SOr)) return nullptr;
+        std::vector<AstNodeExpr*> opps;
+        collectOrOperands(sexprp->exprp(), opps);
+        AstNodeExpr* resultp = nullptr;
+        for (AstNodeExpr* const opp : opps) {
+            FileLine* const flp = opp->fileline();
+            AstNodeExpr* const preExprp = sexprp->preExprp();
+            AstNodeExpr* const termp
+                = new AstSExpr{flp, preExprp ? preExprp->cloneTreePure(false) : nullptr,
+                               delayp->cloneTree(false), opp->cloneTreePure(false)};
+            resultp = resultp ? new AstSOr{sexprp->fileline(), resultp, termp} : termp;
+        }
+        return resultp;
+    }
+    // Build `s1 or s2 ...` at the end of an asserted property, with fixed-length sequences of
+    // boolean leaves as operands, or return an invalid result for other operands
+    BuildResult buildFixedSeqOrProp(AstNodeExpr* lhsp, AstNodeExpr* rhsp,
+                                    SvaStateVertex* entryVtxp, FileLine* flp) {
+        // It holds when any operand matches, and fails once all have failed (IEEE 1800-2023
+        // 16.9.7, 16.12.2). The operands of an attempt start together and have fixed lengths, so
+        // at each clock offset track the set of operands of the attempt still matching. Offsets
+        // with no check and no end leave the set unchanged, so a delay ring skips them.
+        std::vector<AstNodeExpr*> opps;
+        collectOrOperands(lhsp, opps);
+        collectOrOperands(rhsp, opps);
+        if (opps.size() > MAX_FIXED_OR_OPERANDS) return BuildResult::fail();
+        std::vector<FixedOrOperand> ops(opps.size());
+        std::set<int> offsets{0};  // Offsets of the start, and where an operand checks or ends
+        for (size_t i = 0; i < opps.size(); ++i) {
+            if (!flattenFixedSeq(opps[i], 0, ops[i].checks)) return BuildResult::fail();
+            ops[i].length = fixedLength(opps[i]);
+            for (const auto& offsetChecks : ops[i].checks) offsets.insert(offsetChecks.first);
+            offsets.insert(ops[i].length);
+        }
+        SvaStateVertex* const matchVtxp = scopedCreateVertex();
+        SvaStateVertex* const sinkVtxp = m_graph.createStateVertex();
+        sinkVtxp->m_isRejectSink = true;
+        // The operand sets an attempt can move to number up to 3^n per checked offset, so their
+        // transitions are bounded
+        size_t transitions = 0;
+        // Vertices of the current offset, by the set of operands still matching
+        std::map<unsigned, SvaStateVertex*> livep;
+        livep[(1U << ops.size()) - 1] = entryVtxp;
+        for (auto it = offsets.begin(); !livep.empty(); ++it) {
+            const int offset = *it;
+            unsigned checkedMask = 0;
+            for (size_t i = 0; i < ops.size(); ++i) {
+                if (ops[i].checks.count(offset)) checkedMask |= 1U << i;
+            }
+            // Vertices entering the delay to the next offset, by the set of operands holding
+            std::map<unsigned, SvaStateVertex*> holdp;
+            for (const auto& maskVtx : livep) {
+                const unsigned mask = maskVtx.first;
+                SvaStateVertex* const fromp = maskVtx.second;
+                // The attempt fails when no operand still matching holds
+                m_graph.addLink(fromp, sinkVtxp, newAnyHoldsp(ops, mask, offset, flp))
+                    ->m_rejectOnFail
+                    = true;
+                // It matches when an operand ending here holds
+                unsigned endedMask = 0;
+                for (size_t i = 0; i < ops.size(); ++i) {
+                    if ((mask & (1U << i)) && ops[i].length == offset) endedMask |= 1U << i;
+                }
+                if (endedMask) {
+                    guardedLink(fromp, matchVtxp, newAnyHoldsp(ops, endedMask, offset, flp), flp);
+                }
+                // Otherwise it continues with the operands that hold. An operand with no check
+                // here holds.
+                const unsigned contMask = mask & ~endedMask;
+                const unsigned uncheckedMask = contMask & ~checkedMask;
+                for (unsigned checkedSub = contMask & checkedMask;;
+                     checkedSub = (checkedSub - 1) & contMask & checkedMask) {
+                    const unsigned sub = checkedSub | uncheckedMask;
+                    if (sub) {
+                        if (++transitions > MAX_FIXED_OR_TRANSITIONS) {
+                            flp->v3warn(E_UNSUPPORTED,
+                                        "Unsupported: sequence 'or' with more than "
+                                            << MAX_FIXED_OR_TRANSITIONS
+                                            << " transitions between the sets of operands still"
+                                               " matching in an asserted property"
+                                               " (IEEE 1800-2023 16.9.7)");
+                            return BuildResult::failWithError();
+                        }
+                        AstNodeExpr* condp = newAllHoldp(ops, sub, offset, true, flp);
+                        if (const unsigned failMask = (contMask & ~sub) | endedMask) {
+                            condp = new AstLogAnd{flp, condp,
+                                                  newAllHoldp(ops, failMask, offset, false, flp)};
+                        }
+                        SvaStateVertex*& toVtxp = holdp[sub];
+                        if (!toVtxp) toVtxp = scopedCreateVertex();
+                        guardedLink(fromp, toVtxp, condp, flp);
+                    }
+                    if (!checkedSub) break;
+                }
+            }
+            std::map<unsigned, SvaStateVertex*> nextp;
+            for (const auto& subVtx : holdp) {
+                const unsigned gap = static_cast<unsigned>(*std::next(it) - offset);
+                nextp[subVtx.first] = addDelayChain(subVtx.second, gap, flp);
+            }
+            livep = std::move(nextp);
+        }
+        V3Stats::addStatSum("Assertions, NFA 'or' operand set transitions", transitions);
+        return {matchVtxp, nullptr, {}};
+    }
+
+    // The conjunction of the checks of a sequence of boolean leaves with no cycle delay, or
+    // nullptr for other sequences
+    static AstNodeExpr* newZeroLengthCondp(AstNodeExpr* nodep, FileLine* flp) {
+        std::map<int, std::vector<AstNodeExpr*>> checks;
+        if (!flattenFixedSeq(nodep, 0, checks) || checks.size() != 1 || checks.count(0) != 1) {
+            return nullptr;
+        }
+        AstNodeExpr* condp = nullptr;
+        for (AstNodeExpr* const leafp : checks[0]) {
+            AstNodeExpr* const clonep = leafp->cloneTreePure(false);
+            condp = condp ? new AstLogAnd{flp, condp, clonep} : clonep;
+        }
+        return condp;
+    }
+    // Whether an operand of 'or' is a property rather than a sequence (IEEE 1800-2023 16.12)
+    static bool isPropertyOperand(const AstNode* const nodep) {
+        return nodep->exists([](const AstNodeExpr* const np) {
+            const AstLogNot* const notp = VN_CAST(np, LogNot);
+            return VN_IS(np, Implication) || VN_IS(np, Until) || VN_IS(np, PropAlways)
+                   || VN_IS(np, SEventually) || VN_IS(np, AbortOn)
+                   || (notp && hasMultiCycleExpr(notp->lhsp()));
+        });
+    }
+    // Whether a property operand detects failures without the 'or' merge vertex
+    static bool hasOwnFailure(const AstNode* const nodep) {
+        return nodep->exists([](const AstNodeExpr* const np) {
+            const AstAbortOn* const abortp = VN_CAST(np, AbortOn);
+            return VN_IS(np, PropAlways) || (abortp && !abortp->kind().isAccept());
+        });
+    }
+    // Describe an asserted 'or' that buildFixedSeqOrProp does not handle
+    static std::string orUnsupportedContext(AstNodeExpr* lhsp, AstNodeExpr* rhsp,
+                                            bool wantBoolLeaf) {
+        if (!wantBoolLeaf) {
+            return "sequence 'or' with a multi-cycle operand inside another operator of an"
+                   " asserted property (IEEE 1800-2023 16.9.7)";
+        }
+        if (isPropertyOperand(lhsp) || isPropertyOperand(rhsp)) {
+            return "property 'or' with a property operand in an asserted property"
+                   " (IEEE 1800-2023 16.12.4)";
+        }
+        std::vector<AstNodeExpr*> opps;
+        collectOrOperands(lhsp, opps);
+        collectOrOperands(rhsp, opps);
+        if (opps.size() > MAX_FIXED_OR_OPERANDS) {
+            return "sequence 'or' with more than " + std::to_string(MAX_FIXED_OR_OPERANDS)
+                   + " operands in an asserted property (IEEE 1800-2023 16.9.7)";
+        }
+        return "sequence 'or' with an operand that is not a fixed-length sequence of boolean"
+               " expressions in an asserted property (IEEE 1800-2023 16.9.7)";
+    }
+
     // Build merge vertex for SOr / LogOr: both branches feed into one vertex.
     BuildResult buildOrMerge(AstNodeExpr* lhsp, AstNodeExpr* rhsp, SvaStateVertex* entryVtxp,
                              FileLine* flp, bool wantBoolLeaf) {
         // An attempt fails when every operand fails, which the merge vertex does not see
         const bool canFail = !m_isCover && !m_inAntecedent;
+        if (wantBoolLeaf || (canFail && !m_inEmptyMatchConsequent)) {
+            // Operands with no cycle delay hold or fail at once, as the boolean OR-fold below
+            if (AstNodeExpr* const lhsCondp = newZeroLengthCondp(lhsp, flp)) {
+                if (AstNodeExpr* const rhsCondp = newZeroLengthCondp(rhsp, flp)) {
+                    return {entryVtxp, new AstLogOr{flp, lhsCondp, rhsCondp}, {}};
+                }
+                VL_DO_DANGLING(lhsCondp->deleteTree(), lhsCondp);
+            }
+        }
         if (canFail && wantBoolLeaf) {
             if (isPlainBoolean(lhsp) && hasMultiCycleExpr(rhsp)) {
                 return buildBoolOrProp(lhsp, rhsp, entryVtxp, flp);
             }
             if (isPlainBoolean(rhsp) && hasMultiCycleExpr(lhsp)) {
                 return buildBoolOrProp(rhsp, lhsp, entryVtxp, flp);
+            }
+            if (!isPlainBoolean(lhsp) && !isPlainBoolean(rhsp)) {
+                const BuildResult fixedOr = buildFixedSeqOrProp(lhsp, rhsp, entryVtxp, flp);
+                if (fixedOr.valid() || fixedOr.errorEmitted) return fixedOr;
+                // A property operand reports its own unsupported forms when built
+                if (!m_isNegated && !m_isSeqEvent && !isPropertyOperand(lhsp)
+                    && !isPropertyOperand(rhsp)) {
+                    // The merge vertex below would drop an attempt in which every operand fails
+                    flp->v3warn(E_UNSUPPORTED,
+                                "Unsupported: " << orUnsupportedContext(lhsp, rhsp, true));
+                    return BuildResult::failWithError();
+                }
             }
         }
         const BuildResult lhs = buildExpr(lhsp, entryVtxp);
@@ -1241,6 +1475,18 @@ class SvaNfaBuilder final {
                 freeUnlinkedCondp(rhs.finalCondp);
                 return {entryVtxp, orCondp, {}};
             }
+        }
+        // An 'always' or 'reject_on' operand rejects on its own, and keeps the failures that
+        // the merge vertex below reports, including those at the end of simulation
+        const bool ownFailure = (isPropertyOperand(lhsp) || isPropertyOperand(rhsp))
+                                && (hasOwnFailure(lhsp) || hasOwnFailure(rhsp));
+        if (canFail && !m_isNegated && !m_isSeqEvent && !booleanOnly && !ownFailure) {
+            // The merge vertex below would drop an attempt in which every operand fails
+            flp->v3warn(E_UNSUPPORTED,
+                        "Unsupported: " << orUnsupportedContext(lhsp, rhsp, wantBoolLeaf));
+            freeUnlinkedCondp(lhs.finalCondp);
+            freeUnlinkedCondp(rhs.finalCondp);
+            return BuildResult::failWithError();
         }
         SvaStateVertex* const mergeVtxp = scopedCreateVertex();
         if (booleanOnly) {
@@ -1386,6 +1632,14 @@ class SvaNfaBuilder final {
         }
         FileLine* const flp = nodep->fileline();
         const int slack = outerLen - innerLen;
+        // The alternative inner placements below form a sequence 'or', which drops an attempt
+        // in which every placement fails
+        if (slack && !m_isCover && !m_inAntecedent && !m_isNegated && !m_isSeqEvent) {
+            nodep->v3warn(E_UNSUPPORTED, "Unsupported: 'within' with an inner sequence shorter"
+                                         " than the outer sequence in an asserted property"
+                                         " (IEEE 1800-2023 16.9.10)");
+            return BuildResult::failWithError();
+        }
         AstNodeExpr* innerOrp = nullptr;
         for (int i = 0; i <= slack; ++i) {
             const int postPad = slack - i;
@@ -1937,6 +2191,16 @@ public:
         const bool wantBoolLeaf = m_wantBoolLeaf;
         m_wantBoolLeaf = false;
         if (AstSExpr* const sexprp = VN_CAST(nodep, SExpr)) {
+            if (wantBoolLeaf && !m_isCover && !m_inAntecedent && !m_isNegated && !m_isSeqEvent) {
+                if (AstNodeExpr* const orp = newDistributedOrp(sexprp)) {
+                    // Build `s ##N (s1 or s2)` as `(s ##N s1) or (s ##N s2)` (IEEE 1800-2023
+                    // 16.9.7), which buildFixedSeqOrProp can make fail
+                    m_wantBoolLeaf = true;
+                    const BuildResult result = buildExpr(orp, entryVtxp, isTopLevelStep);
+                    VL_DO_DANGLING(orp->deleteTree(), orp);
+                    return result;
+                }
+            }
             return buildSExpr(sexprp, entryVtxp, isTopLevelStep);
         }
         if (AstSConsRep* const repp = VN_CAST(nodep, SConsRep)) {
@@ -2160,6 +2424,7 @@ class SvaNfaLowering final {
     V3UniqueNames m_names{"__Vnfa"};  // Unique names for generated variables
     size_t m_statDelayRingEdgeVisits = 0;  // Delay-ring incoming edges visited
     size_t m_statLinkResolves = 0;  // Combinational vertex state signals built
+    size_t m_statVertices = 0;  // NFA state vertices lowered
 
     // Per-lowering shared context (passed to phase sub-functions)
     // Per-vertex lowering state is stored in SvaVertexData and accessed via
@@ -3353,6 +3618,7 @@ public:
     ~SvaNfaLowering() {
         V3Stats::addStatSum("Assertions, NFA delay ring edge visits", m_statDelayRingEdgeVisits);
         V3Stats::addStatSum("Assertions, NFA link resolves", m_statLinkResolves);
+        V3Stats::addStatSum("Assertions, NFA state vertices", m_statVertices);
     }
 
     // Return the statements run by an assertion failing at end of simulation
@@ -3543,6 +3809,8 @@ public:
             m_modp->addStmtsp(varp);
             vtx[i]->datap()->stateVarp = varp;
         }
+
+        m_statVertices += vtx.size();
 
         // Build lowering context for phase sub-functions.
         LowerCtx c{flp,           senTreep, disableExprp, matchCondp,  assertType,
