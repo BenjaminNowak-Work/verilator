@@ -7518,7 +7518,8 @@ class WidthVisitor final : public VNVisitor {
         if (isElement) {
             iterateCheckTyped(itemp, "value", valuep, elemDtp, FINAL);
         } else {
-            userIterateAndNext(valuep, WidthVP{arrayDtp, FINAL}.p());
+            userIterateAndNext(convertUnpackedOrder(valuep, arrayDtp),
+                               WidthVP{arrayDtp, FINAL}.p());
         }
     }
     void addConsItem(AstNodeExpr* consp, AstNodeExpr* valuep) {
@@ -11422,9 +11423,27 @@ class WidthVisitor final : public VNVisitor {
         // UINFOTREE(1, parentp, "", "checkout");
         (void)rhsp;  // cppcheck
     }
-    // Convert an unpacked array value to an equivalent type with some dimension reversed,
-    // keeping elements in left-to-right order (IEEE 1800-2023 7.6)
+    // Convert an unpacked array value to a type with some dimension reversed
     AstNodeExpr* convertUnpackedOrder(AstNodeExpr* exprp, AstNodeDType* dtypep) {
+        // Elements keep their left-to-right order (IEEE 1800-2023 7.6).
+        // A dynamic array or queue takes the elements in the order of an ascending fixed-size
+        // array.
+        const AstUnpackArrayDType* const fromArrayp
+            = VN_CAST(exprp->dtypep()->skipRefp(), UnpackArrayDType);
+        if (fromArrayp
+            && (VN_IS(dtypep->skipRefp(), DynArrayDType)
+                || VN_IS(dtypep->skipRefp(), QueueDType))) {
+            FileLine* const flp = exprp->fileline();
+            AstUnpackArrayDType* const ascendingp
+                = new AstUnpackArrayDType{flp, dtypep->skipRefp()->subDTypep(),
+                                          new AstRange{flp, 0, fromArrayp->elementsConst() - 1}};
+            if (!ascendingp->isReverseOf(fromArrayp)) {
+                VL_DO_DANGLING(ascendingp->deleteTree(), ascendingp);
+                return exprp;
+            }
+            v3Global.rootp()->typeTablep()->addTypesp(ascendingp);
+            dtypep = ascendingp;
+        }
         const AstUnpackArrayDType* const arrayp = VN_CAST(dtypep->skipRefp(), UnpackArrayDType);
         if (!arrayp || !arrayp->isReverseOf(exprp->dtypep())) return exprp;
         VNRelinker relinker;
@@ -13248,10 +13267,13 @@ public:
                               "Unsupported: Stream of a dynamically sized array into "
                                   << lhsDTypeSkippedRefp->prettyDTypeNameQ());
             }
-            const bool packedToDynamic = (VN_IS(lhsDTypeSkippedRefp, DynArrayDType)
-                                          || VN_IS(lhsDTypeSkippedRefp, QueueDType))
-                                         && lhsDTypeSkippedRefp->subDTypep()->isIntegralOrPacked()
-                                         && !VN_IS(streamp->dtypep(), StreamDType);
+            const bool toDynamic
+                = (VN_IS(lhsDTypeSkippedRefp, DynArrayDType)
+                   || VN_IS(lhsDTypeSkippedRefp, QueueDType))
+                  && lhsDTypeSkippedRefp->subDTypep()->skipRefp()->isIntegralOrPacked();
+            // A fixed-size unpacked operand streams its packed value into a dynamic target
+            if (toDynamic && VN_IS(streamp->dtypep(), StreamDType)) packStreamOperand(streamp);
+            const bool packedToDynamic = toDynamic && !VN_IS(streamp->dtypep(), StreamDType);
             if ((packedToDynamic || fixedTarget) && !asQueue) {
                 FileLine* const flp = streamp->fileline();
                 AstNodeExpr* srcp = streamp->unlinkFrBack();
@@ -13261,9 +13283,8 @@ public:
                     streamp->dtypeFrom(streamp->lhsp());
                 }
                 if (packedToDynamic) {
-                    // Zero-fill to a whole number of elements as for a queue target before:
-                    // a '>>' stream on the left, as a queue source is read back, a '<<' stream
-                    // on the right. IEEE 1800-2023 11.4.14 zero-fills both on the right.
+                    // Zero-fill on the right to a whole number of elements (IEEE 1800-2023
+                    // 11.4.14)
                     const int elemWidth = lhsDTypeSkippedRefp->subDTypep()->width();
                     const int padWidth = (elemWidth - srcp->width() % elemWidth) % elemWidth;
                     if (padWidth) {
@@ -13272,8 +13293,7 @@ public:
                         userIterate(srcp, WidthVP{SELF, FINAL, STREAM_USE_ASSIGN}.p());
                         AstConst* const zerop
                             = new AstConst{flp, AstConst::WidthedValue{}, padWidth, 0};
-                        srcp = VN_IS(srcp, StreamR) ? new AstConcat{flp, zerop, srcp}
-                                                    : new AstConcat{flp, srcp, zerop};
+                        srcp = new AstConcat{flp, srcp, zerop};
                         srcp->didWidth(true);
                     }
                 } else if (!lowerAsFixedAggregate(lhsDTypeSkippedRefp)
