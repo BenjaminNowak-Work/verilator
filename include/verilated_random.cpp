@@ -1615,23 +1615,27 @@ void VlRandomizer::solveDiversityXor(VlRNG& rngr, VlSolverSession& sess)
 }
 
 // Re-add softs highest-priority first, dropping incompatible ones.
-void VlRandomizer::relaxSoftConstraints(VlSolverSession& sess) VL_REQUIRES(sess.m_mutex) {
-    if (m_softConstraints.empty()) return;
+bool VlRandomizer::relaxSoftConstraints(VlSolverSession& sess) VL_REQUIRES(sess.m_mutex) {
+    if (m_softConstraints.empty()) return true;
     std::iostream& os = sess.os();
     os << "(push 1)\n";
     for (const auto& s : m_softConstraints) os << "(assert (= #b1 " << s << "))\n";
     os << "(check-sat)\n";
     const VlSolverStatus status = sess.readStatus();
-    if (status == VlSolverStatus::SAT || status == VlSolverStatus::FAIL) return;
+    if (status == VlSolverStatus::SAT || status == VlSolverStatus::FAIL)
+        return status == VlSolverStatus::SAT;
+    bool determinate = status == VlSolverStatus::UNSAT;
     os << "(pop 1)\n";
     for (auto it = m_softConstraints.rbegin(); it != m_softConstraints.rend(); ++it) {
         os << "(push 1)\n";
         os << "(assert (= #b1 " << *it << "))\n";
         os << "(check-sat)\n";
         const VlSolverStatus probe = sess.readStatus();
-        if (probe == VlSolverStatus::FAIL) return;
+        if (probe == VlSolverStatus::FAIL) return false;
+        if (probe == VlSolverStatus::UNKNOWN) determinate = false;
         if (probe != VlSolverStatus::SAT) os << "(pop 1)\n";
     }
+    return determinate;
 }
 
 // Every complete run of digits in the reply, in order
@@ -2007,28 +2011,31 @@ bool VlRandomizer::solvePhases(VlRNG& rngr, VlSolverSession& sess,
     std::iostream& os = sess.os();
     std::map<std::string, std::string> solvedValues;  // varName -> SMT value literal
     const char* const logicp = phasedLogic();
+    bool reuseBase = false;  // Certified only within this attempt, never across next() calls.
 
     for (size_t phase = 0; phase < layers.size(); phase++) {
         const bool isFinalPhase = (phase == layers.size() - 1);
 
-        os << "(set-option :produce-models true)\n";
-        if (solverSamples()) emitSolverSeed(os, rngr);
-        os << "(set-logic " << logicp << ")\n";
-        emitDefines(os);
-        emitDeclares(os, false);
+        if (!reuseBase) {
+            os << "(set-option :produce-models true)\n";
+            if (solverSamples()) emitSolverSeed(os, rngr);
+            os << "(set-logic " << logicp << ")\n";
+            emitDefines(os);
+            emitDeclares(os, false);
+        }
 
         for (const auto& entry : solvedValues) {
             os << "(assert (= " << entry.first << " " << entry.second << "))\n";
         }
-        emitAsserts(os, uniqueExprs, false);
+        if (!reuseBase) {
+            emitAsserts(os, uniqueExprs, false);
+            emitRandcExclusions(os);
+            // Valid witness pins keep accepted softs feasible and rejected softs UNSAT.
+            // UNKNOWN/FAIL still follows legacy relaxation, but cannot certify reuse.
+            reuseBase = relaxSoftConstraints(sess) && !solverSamples();
+        }
 
-        // Randc: exclude previously used values
-        emitRandcExclusions(os);
-
-        // Soft constraints participate in every phase, priority-ordered.
-        relaxSoftConstraints(sess);
-
-        // Initial check-sat WITHOUT diversity (guaranteed sat if constraints are consistent)
+        // Even a certified selection needs a mandatory check after the new pins.
         os << "(check-sat)\n";
         const VlSolverStatus status = sess.readStatus();
         if (status != VlSolverStatus::SAT) {
@@ -2044,7 +2051,7 @@ bool VlRandomizer::solvePhases(VlRNG& rngr, VlSolverSession& sess,
             recordRandcValues();
         } else {
             if (!solvePhaseValues(sess, rngr, layers[phase], solvedValues)) return false;
-            os << "(reset)\n";
+            if (!reuseBase) os << "(reset)\n";
         }
     }
 
@@ -2429,9 +2436,9 @@ bool VlRandomizer::solvePhaseValues(VlSolverSession& sess, VlRNG& rngr,
     if (!readPhaseValues(sess, requests, solvedValuesr)) return false;
     if (solverSamples()) return true;
 
-    // Try diversity: add random constraint, re-check. If sat, get
-    // updated (more diverse) values. If unsat, keep baseline values.
+    // Keep the sampling cell out of the retained base and subsequent phase pins.
     // Scoped to this layer's own vars -- see randomConstraint's comment.
+    os << "(push 1)\n";
     os << "(assert ";
     randomConstraint(os, rngr, _VL_SOLVER_HASH_LEN, &layerVars);
     os << ")\n";
@@ -2441,6 +2448,7 @@ bool VlRandomizer::solvePhaseValues(VlSolverSession& sess, VlRNG& rngr,
         emitGetValueCmd();
         validReply = readPhaseValues(sess, requests, solvedValuesr);
     }
+    os << "(pop 1)\n";
     return validReply;
 }
 
