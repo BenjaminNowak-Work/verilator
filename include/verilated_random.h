@@ -250,6 +250,7 @@ public:
 };
 
 class VlSolverSession;
+struct VlPhaseValueRequest;
 
 //=============================================================================
 // Object holding constraints and variable references.
@@ -375,8 +376,12 @@ class VlRandomizer VL_NOT_FINAL {
     bool solvePhaseValues(VlSolverSession& sess, VlRNG& rngr,
                           const std::vector<std::string>& layerVars,
                           std::map<std::string, std::string>& solvedValuesr);
-    bool readPhaseValues(VlSolverSession& sess, std::map<std::string, std::string>& solvedValuesr);
-    bool parsePhaseValues(std::istream& is, std::map<std::string, std::string>& solvedValuesr);
+    bool buildPhaseValueRequests(const std::vector<std::string>& layerVars,
+                                 std::vector<VlPhaseValueRequest>& requests);
+    bool readPhaseValues(VlSolverSession& sess, const std::vector<VlPhaseValueRequest>& requests,
+                         std::map<std::string, std::string>& solvedValuesr);
+    bool parsePhaseValues(std::istream& is, const std::vector<VlPhaseValueRequest>& requests,
+                          std::map<std::string, std::string>& solvedValuesr);
 
 public:
     // CONSTRUCTORS

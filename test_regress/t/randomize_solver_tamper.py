@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# DESCRIPTION: Verilator: fake SMT solver wrapper for solver resilience tests
+# DESCRIPTION: Verilator: real SMT solver reply wrapper for resilience tests
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of either the GNU Lesser General Public License Version 3,
@@ -100,7 +100,7 @@ ASSUME_MODES = ("err_assume", "garbage_assume", "oor_assume", "stale_assume")
 # Modes acting on an unsat-core reply, which lists __Vcons<N> names
 CORE_MODES = ("core_junk", "err_core")
 # Modes rewriting every line, so they never consume the index
-STREAM_MODES = ("crlf", "indent", "multiline", "success")
+STREAM_MODES = ("crlf", "indent", "indexed_literals", "multiline", "success")
 
 
 def real_solver():
@@ -126,6 +126,8 @@ def forward(text, at_start):
     # Solvers echo success per command, so never inside a wrapped S-expression
     if mode == "success" and at_start:
         emit("success")
+    if mode == "indexed_literals":
+        text = re.sub(LITERAL_PATTERN, indexed_literal, text)
     if mode == "multiline" and text.startswith("(") and not text.startswith("(error"):
         for tok in text.split():
             emit(tok)
@@ -136,12 +138,12 @@ def forward(text, at_start):
 
 
 def scan_depth(text, left, in_string):
-    """Paren depth of text, ignoring parens inside SMT string literals"""
+    """Paren depth, ignoring delimiters inside SMT strings and quoted symbols."""
     for char in text:
         if in_string:
-            in_string = char != '"'
-        elif char == '"':
-            in_string = True
+            in_string = False if char == in_string else in_string
+        elif char in ('"', '|'):
+            in_string = char
         elif char == "(":
             left += 1
         elif char == ")":
@@ -167,6 +169,214 @@ def swallow(first):
     read_full(first)
 
 
+# Explicit test-local mutations for the exact-width and phased reply cases.
+# These replace one real get-value reply; the solver still evaluates every query.
+PHASE_REPLIES = {
+    "phase_typed_const":
+    "((x (_ bv5 7)) (za ((as const (Array (_ BitVec 32) (_ BitVec 7))) (_ bv0 7))))",
+    "phase_typed_store":
+    "((x (_ bv5 7)) (za (store ((as const (Array (_ BitVec 32) (_ BitVec 7)))"
+    " (_ bv0 7)) (_ bv1 32) (_ bv3 7))))",
+    "phase_typed_let":
+    "((x (_ bv5 7)) (za (let ((|a)| ((as const (Array (_ BitVec 32) (_ BitVec 7)))"
+    " (_ bv0 7)))) (store |a)| (_ bv1 32) (_ bv3 7)))))",
+    "phase_typed_bad_sort":
+    "((x (_ bv5 7)) (za ((as const (Array (_ BitVec 31) (_ BitVec 7))) (_ bv0 7))))",
+    "phase_typed_bad_leaf":
+    "((x (_ bv5 7)) (za ((as const (Array (_ BitVec 32) (_ BitVec 7))) (_ bv0 8))))",
+    "phase_typed_bad_index":
+    "((x (_ bv5 7)) (za (store ((as const (Array (_ BitVec 32) (_ BitVec 7)))"
+    " (_ bv0 7)) (_ bv1 31) (_ bv3 7))))",
+    "phase_indexed_let":
+    "((x (let ((|v| (_ bv5 7))) v)) (z (_ bv6 15)))",
+    "phase_quoted_paren":
+    "((x (let ((|v)| #b0000101)) |v)|)) (z #b000000000000110))",
+    "phase_let_nested":
+    "((x (let ((v #b0000101)) (let ((v #b0000000) (|w| v)) w)))"
+    " (z #b000000000000110))",
+    "phase_huge_sort":
+    "((x (_ bv0 1048576)) (z #b000000000000110))",
+    "phase_noncanonical":
+    "((x (_ bv05 7)) (z #b000000000000110))",
+    "phase_indexed_wrong_width":
+    "((x (_ bv5 8)) (z #b000000000000110))",
+    "phase_indexed":
+    "((x (_ bv5 7)) (z (_ bv6 15)))",
+    "phase_indexed_overflow":
+    "((x (_ bv128 7)) (z (_ bv6 15)))",
+    "phase_reordered":
+    "((z #b000000000000110) (|x| #b0000101))",
+    "phase_array":
+    "((x ((as const (Array (_ BitVec 32) (_ BitVec 7))) #b0000101))"
+    " (z #b000000000000110))",
+    "phase_duplicate":
+    "((x #b0000101) (|x| #b0000101))",
+    "phase_empty":
+    "()",
+    "phase_extra":
+    "((x #b0000101) (z #b000000000000110) (other #b0))",
+    "phase_let":
+    "((|x| (let ((|v| #b0000101)) v)) (z #b000000000000110))",
+    "phase_let_duplicate":
+    "((x (let ((v #b0000101) (|v| #b0000101)) v))"
+    " (z #b000000000000110))",
+    "phase_let_reserved":
+    "((x (let ((let #b0000101)) let)) (z #b000000000000110))",
+    "phase_let_simultaneous":
+    "((x (let ((v #b0000101) (w v)) w))"
+    " (z #b000000000000110))",
+    "phase_missing":
+    "((x #b0000101))",
+    "phase_unknown":
+    "((other #b0000101) (z #b000000000000110))",
+    "phase_width":
+    "((x #b00000101) (z #b000000000000110))",
+}
+
+LITERAL_PATTERN = r"(?:#[bx][0-9a-fA-F]+|\(\s*_\s+bv[0-9]+\s+[0-9]+\s*\))"
+
+
+def literal_value(text):
+    """Read width/value from a real binary, hexadecimal or indexed SMT literal."""
+    if text.startswith('#'):
+        digits = text[2:]
+        return len(digits) * (1 if text[1] == 'b' else 4), int(digits, 2 if text[1] == 'b' else 16)
+    match = re.fullmatch(r"\(\s*_\s+bv([0-9]+)\s+([0-9]+)\s*\)", text)
+    assert match, "Expected one valid real bit-vector literal"
+    return int(match[2]), int(match[1])
+
+
+def literal_binary(text):
+    """Preserve value and width when spelling a real literal in binary."""
+    width, value = literal_value(text)
+    return '#b' + format(value, '0' + str(width) + 'b')
+
+
+def binary_literal(match):
+    """Rewrite one matched real literal without changing its value or width."""
+    return literal_binary(match.group(0))
+
+
+def indexed_literal(match):
+    """Spell one real bit-vector literal in indexed SMT-LIB notation."""
+    width, value = literal_value(match.group(0))
+    return '(_ bv' + str(value) + ' ' + str(width) + ')'
+
+
+def select_scalar(reply):
+    """Answer exactly one real scalar as a select, including a quoted scalar name."""
+    rewritten, count = re.subn(r'\((?:a|\|a\|)\s+', '((select a #x00000000) ', reply, count=1)
+    assert count == 1 and rewritten != reply, "Expected one real scalar shape mutation"
+    return rewritten
+
+
+def alternate_literal(match):
+    """Give the same bits in another supported notation to test canonical identity."""
+    width, value = literal_value(match.group(0))
+    return ('(_ bv' + str(value) + ' ' + str(width) +
+            ')' if match.group(0).startswith('#b') else binary_literal(match))
+
+
+def rewrite_index(reply, change):
+    """Change exactly one real q index, regardless of the solver's literal notation."""
+    pattern = r'((?:q|\|q\|)\s+)(' + LITERAL_PATTERN + r')'
+    rewritten, count = re.subn(pattern,
+                               lambda match: match[1] + change(*literal_value(match[2])),
+                               reply,
+                               count=1)
+    assert count == 1 and rewritten != reply, "Expected one changed real array index"
+    return rewritten
+
+
+def model_pairs(reply):
+    """Split a real model into its top-level pairs without splitting select terms."""
+    pairs = []
+    nesting = 0
+    start = 0
+    quoted = ''
+    for pos, char in enumerate(reply):
+        if quoted:
+            if char == quoted:
+                quoted = ''
+        elif char in ('"', '|'):
+            quoted = char
+        elif char == "(":
+            if nesting == 1:
+                start = pos
+            nesting += 1
+        elif char == ")":
+            nesting -= 1
+            if nesting == 1:
+                pairs.append(reply[start:pos + 1])
+    assert not quoted and nesting == 0 and pairs, "Expected a complete real model"
+    return pairs
+
+
+def duplicate_element(reply):
+    """Answer one array element twice with hex and binary spelling of its index."""
+    pairs = model_pairs(reply)
+    duplicate = re.sub(LITERAL_PATTERN, alternate_literal, pairs[0])
+    return "(" + " ".join(pairs + [duplicate]) + ")"
+
+
+def extend_array_value(reply):
+    """Make the last element invalid after every earlier element has parsed."""
+    pairs = model_pairs(reply)
+    pairs[-1], count = re.subn(r'(' + LITERAL_PATTERN + r')\s*\)$',
+                               lambda match: '#b0' + literal_binary(match[1])[2:] + ')', pairs[-1])
+    assert count == 1, "Expected the last real array value in a supported notation"
+    return "(" + " ".join(pairs) + ")"
+
+
+def rewrite_width(reply, name, change):
+    """Make exactly one real scalar value the wrong width in a supported notation."""
+    pattern = r'\((?:' + name + r'|\|' + name + r'\|)\s+(' + LITERAL_PATTERN + r')\s*\)'
+    rewritten, count = re.subn(
+        pattern, lambda match: '(' + name + ' #b' + change(literal_binary(match[1])[2:]) + ')',
+        reply)
+    assert count == 1 and rewritten != reply, "Expected one changed requested scalar"
+    return rewritten
+
+
+EXACT_REWRITES = {
+    "array_binary":
+    lambda reply: re.sub(LITERAL_PATTERN, binary_literal, reply),
+    "array_duplicate":
+    duplicate_element,
+    "array_index_width":
+    lambda reply: rewrite_index(
+        reply, lambda width, value: '#b' + format(value, '0' + str(width + 1) + 'b')),
+    "array_scalar":
+    lambda reply: "((q #b1010101))",
+    "array_unknown_index":
+    lambda reply: rewrite_index(reply, lambda width, value: '#b' + '1' * width),
+    "array_value_width":
+    extend_array_value,
+    "width_disabled":
+    lambda reply: rewrite_width(reply, "b", lambda digits: "0" + digits),
+    "width_long":
+    lambda reply: rewrite_width(reply, "g", lambda digits: "0" + digits),
+    "width_scalar_select":
+    select_scalar,
+    "width_indexed":
+    lambda reply: re.sub(LITERAL_PATTERN, indexed_literal, reply),
+    "width_quoted":
+    lambda reply: re.sub(r'\(([a-g])\s+', lambda match: '(|' + match[1] + '| ', reply),
+    "width_short":
+    lambda reply: rewrite_width(reply, "g", lambda digits: digits[1:]),
+}
+
+
+def record_mutation(original_reply, mutated_reply):
+    """Keep test-local evidence that the intended real reply was replaced."""
+    assert original_reply != mutated_reply, "Reply mutation must change the real response"
+    record = os.environ.get("TAMPER_LOG", "")
+    if record:
+        with open(record, "a", encoding="utf-8") as mutation_log:
+            mutation_log.write("MODE=" + mode + "\nCHANGED=1\nREAL=" + original_reply +
+                               "\nREPLY=" + mutated_reply + "\n")
+
+
 replies = 0
 seen_unsat = False
 done = bool(once) and os.path.exists(once)
@@ -187,8 +397,9 @@ for line in proc.stdout:
         counted = at_reply_start and line.startswith("(((select")
     elif mode in RECHECK_MODES:
         counted = is_status and seen_unsat
-    elif mode in PHASE_MODES:
-        counted = at_reply_start and line.startswith("((x")
+    elif mode in PHASE_MODES or mode in PHASE_REPLIES:
+        counted = at_reply_start and re.match(
+            r'^\s*\(\s*\(\s*(?:x|y|z|za|\|x\||\|y\||\|z\||\|za\|)\s', line) is not None
     elif mode in ASSUME_MODES:
         counted = at_reply_start and re.match(r"\(__Va\d", line) is not None
     elif mode in CORE_MODES:
@@ -208,6 +419,24 @@ for line in proc.stdout:
             pass
 
     done = True
+
+    if mode in EXACT_REWRITES or mode in PHASE_REPLIES:
+        original = " ".join(read_full(line))
+        replacement = (PHASE_REPLIES[mode]
+                       if mode in PHASE_REPLIES else EXACT_REWRITES[mode](original))
+        if replacement == original:
+            assert mode in ('array_binary', 'width_indexed', 'width_quoted', 'phase_indexed',
+                            'phase_reordered', 'phase_let', 'phase_indexed_let',
+                            'phase_quoted_paren', 'phase_let_nested', 'phase_typed_const',
+                            'phase_typed_store',
+                            'phase_typed_let'), "Fault mutation unexpectedly unchanged"
+            # A solver already using this valid notation still exercises reply framing.
+            replacement = ' ' + replacement + ' '
+        record_mutation(original, replacement)
+        emit(replacement)
+        depth = 0
+        inside = False
+        continue
 
     if mode == "bad_base":
         emit("((a #z01) (b #x12))")
@@ -356,6 +585,7 @@ for line in proc.stdout:
         swallow(line)
         continue
     if mode == "unknown_once":
+        record_mutation(line, "unknown")
         emit("unknown")
         continue
     if mode == "unknown_twice":

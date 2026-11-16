@@ -75,13 +75,20 @@ test.execute(logfile=logfile,
              'TAMPER=model_trunc TAMPER_AT=8 ')
 test.file_grep(logfile, r'NPASS=(\d+)', 12)
 
-# A value the sampler can't parse, and a status it can't use, seen while it
-# enumerates a cell.
+# Reply 5 answers the first phase's request for x, not a sampler cell.
+# Reject its foreign a/b terms before pins; only that call fails and later calls recover.
 logfile = test.obj_dir + '/sim_ug2_value.log'
+solver_log = test.obj_dir + '/solver_bad_phase.log'
 test.execute(logfile=logfile,
+             all_run_flags=['+verilator+solver+file+' + solver_log],
              run_env='VERILATOR_SOLVER="' + test.t_dir + '/randomize_solver_tamper.py" ' +
              'TAMPER=bad_base TAMPER_AT=5 ')
-test.file_grep(logfile, r'NPASS=(\d+)', 9)
+test.file_grep(logfile, r'NPASS=(\d+)', 11)
+test.file_grep(logfile, r"Unable to parse solver's response: invalid phase model")
+test.file_grep_not(logfile, r'Solver died')
+test.file_grep(
+    solver_log, r'^  \(check-sat\)\n< sat\n  \(get-value \(x\s*\)\)\n'
+    r'< \(\(a #z01\) \(b #x12\)\)\n  \(reset\)')
 
 # A reply naming a variable the sampler didn't ask for.
 logfile = test.obj_dir + '/sim_ug2_var.log'

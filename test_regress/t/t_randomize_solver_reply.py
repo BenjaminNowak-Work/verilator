@@ -16,6 +16,113 @@ if not test.have_solver:
 
 test.compile()
 
+# Each exact-reply case mutates one real get-value reply, checks whether it is
+# accepted, then checks an untouched randomize() in the same simulation. The
+# mutation record proves that a negative case reached the intended boundary.
+exact_runs = [
+    ('widths', None, 0, 0, None),
+    ('widths', 'width_indexed', 0, 0, None),
+    ('widths', 'width_quoted', 0, 0, None),
+    ('widths', 'width_long', 1, 0, 'invalid value'),
+    ('widths', 'width_short', 1, 0, 'invalid value'),
+    ('widths', 'width_scalar_select', 1, 0, 'invalid array index'),
+    ('widths', 'width_disabled', 1, 1, 'invalid value'),
+    ('array', None, 0, 0, None),
+    ('array', 'array_binary', 0, 0, None),
+    ('array', 'array_duplicate', 1, 0, 'repeated variable'),
+    ('array', 'array_index_width', 1, 0, 'invalid array index'),
+    ('array', 'array_scalar', 1, 0, 'invalid array index'),
+    ('array', 'array_unknown_index', 1, 0, 'invalid array index'),
+    ('array', 'array_value_width', 1, 0, 'invalid value'),
+    ('typed_arrays', None, 0, 0, None),
+    ('typed_arrays', 'phase_typed_const', 0, 0, None),
+    ('typed_arrays', 'phase_typed_store', 0, 0, None),
+    ('typed_arrays', 'phase_typed_let', 0, 0, None),
+    ('typed_arrays', 'phase_typed_bad_sort', 1, 0, 'invalid phase model'),
+    ('typed_arrays', 'phase_typed_bad_leaf', 1, 0, 'invalid phase model'),
+    ('typed_arrays', 'phase_typed_bad_index', 1, 0, 'invalid phase model'),
+    ('phase', None, 0, 0, None),
+    ('phase', 'phase_let', 0, 0, None),
+    ('phase', 'phase_indexed', 0, 0, None),
+    ('phase', 'phase_indexed_let', 0, 0, None),
+    ('phase', 'phase_quoted_paren', 0, 0, None),
+    ('phase', 'phase_let_nested', 0, 0, None),
+    ('phase', 'phase_huge_sort', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_noncanonical', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_indexed_wrong_width', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_reordered', 0, 0, None),
+    ('phase', 'phase_indexed_overflow', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_array', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_duplicate', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_empty', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_extra', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_let_duplicate', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_let_reserved', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_let_simultaneous', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_missing', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_unknown', 1, 0, 'invalid phase model'),
+    ('phase', 'phase_width', 1, 0, 'invalid phase model'),
+]
+
+for group, mode, reject, disabled, diagnostic in exact_runs:
+    name = mode or group + '_none'
+    logfile = test.obj_dir + '/sim_exact_' + name + '.log'
+    mutation_log = test.obj_dir + '/mutation_' + name + '.log'
+    test.unlink_ok(mutation_log)
+    run_env = ''
+    if mode:
+        run_env = ('VERILATOR_SOLVER="' + test.t_dir + '/randomize_solver_tamper.py" ' +
+                   'TAMPER=' + mode + ' TAMPER_AT=1 TAMPER_LOG="' + mutation_log + '"')
+    test.execute(
+        logfile=logfile,
+        all_run_flags=['+MODE=' + group, '+REJECT=' + str(reject), '+DISABLED=' + str(disabled)],
+        run_env=run_env)
+    if mode:
+        test.file_grep(mutation_log, 'MODE=' + mode)
+        test.file_grep(mutation_log, r'^CHANGED=1$')
+    if diagnostic:
+        test.file_grep(logfile, 'Unable to parse solver.s response: ' + diagnostic)
+
+# Seed 2 gives a SAT optional trial on the first call. A malformed trial reply
+# must fail that call, rather than silently keeping the earlier complete reply.
+for mode, reject in [(None, 0), ('phase_missing', 1)]:
+    tag = mode or 'none'
+    logfile = test.obj_dir + '/sim_trial_' + tag + '.log'
+    solver_log = test.obj_dir + '/solver_trial_' + tag + '.log'
+    mutation_log = test.obj_dir + '/mutation_trial_' + tag + '.log'
+    test.unlink_ok(mutation_log)
+    run_env = ''
+    if mode:
+        run_env = ('VERILATOR_SOLVER="' + test.t_dir + '/randomize_solver_tamper.py" ' +
+                   'TAMPER=' + mode + ' TAMPER_AT=2 TAMPER_LOG="' + mutation_log + '"')
+    test.execute(logfile=logfile,
+                 all_run_flags=[
+                     '+MODE=phase', '+SEED=2', '+REJECT=' + str(reject),
+                     '+verilator+solver+file+' + solver_log
+                 ],
+                 run_env=run_env)
+    if mode:
+        test.file_grep(mutation_log, r'^CHANGED=1$')
+        test.file_grep(logfile, r"Unable to parse solver's response: invalid phase model")
+        test.file_grep(
+            solver_log, r'^  \(check-sat\)\n< sat\n  \(get-value \(x z \)\)\n'
+            r'< \(\(x #b0000101\)\)')
+
+# Normal and indexed replies must still enumerate witnesses, not silently fall back.
+for notation in ('none', 'indexed_literals'):
+    logfile = test.obj_dir + '/sim_witness_' + notation + '.log'
+    solver_log = test.obj_dir + '/solver_witness_' + notation + '.log'
+    test.execute(logfile=logfile,
+                 all_run_flags=['+verilator+solver+file+' + solver_log],
+                 run_env='VERILATOR_SOLVER="' + test.t_dir + '/randomize_solver_tamper.py" ' +
+                 'TAMPER=' + notation)
+    test.file_grep(logfile, r'NPASS=(\d+)', 16)
+    if notation == 'indexed_literals':
+        # The solver transcript records the reply the runtime actually consumed.
+        test.file_grep(solver_log, r'^< .*\(_ bv[0-9]+ 8\)')
+    digits = r'#b[01]+' if notation == 'indexed_literals' else r'#[bx][0-9a-fA-F]+'
+    test.file_grep(solver_log, r'^  \(assert \(not \(and .*\(= a +' + digits + r'\)')
+
 # 16 randomize calls; each entry names the reply the solver mangles
 runs = [
     ('bad_base', 1, 15),  # a base character that is not b, o, x or h
