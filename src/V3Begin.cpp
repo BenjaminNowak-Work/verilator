@@ -260,6 +260,7 @@ class BeginVisitor final : public VNVisitor {
                 const bool inFunction = m_ftaskp && !m_inStaticInit;
                 varp->funcLocal(inFunction);
                 if (inFunction) {
+                    varp->lifetime(VLifetime::AUTOMATIC_EXPLICIT);
                     m_liftedp = AstNode::addNextNull(m_liftedp, varp);
                 } else {
                     varp->lifetime(VLifetime::STATIC_EXPLICIT);
